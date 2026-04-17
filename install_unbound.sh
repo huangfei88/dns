@@ -536,7 +536,7 @@ POSTHOOK
 #!/usr/bin/env bash
 cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
 cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$CERT_DIR/privkey.pem"
-chown unbound:unbound "$CERT_DIR"/*.pem
+chown unbound:unbound "$CERT_DIR/fullchain.pem" "$CERT_DIR/privkey.pem"
 chmod 640 "$CERT_DIR/privkey.pem"
 chmod 644 "$CERT_DIR/fullchain.pem"
 systemctl reload unbound 2>/dev/null || true
@@ -1453,8 +1453,8 @@ MaxSessions 10
 # 禁用 X11 转发（CIS 5.2.5）
 X11Forwarding no
 
-# 禁用 TCP 转发
-AllowTcpForwarding no
+# 禁用远程 TCP 转发，允许本地转发用于管理
+AllowTcpForwarding local
 
 # 使用强加密算法
 Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
