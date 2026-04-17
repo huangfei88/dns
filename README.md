@@ -13,7 +13,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - **QNAME minimisation** (RFC 7816) for upstream privacy
 - **0x20 query randomisation** to prevent spoofing
 - **Rate limiting** (per-IP and global) with automatic blocking
-- **nftables firewall** with connection tracking and anti-DDoS rules
+- **UFW firewall** (nftables backend) with default-deny policy and rate-limited SSH
 - **Fail2Ban** integration for DNS abuse protection
 - **Systemd sandboxing** (ProtectSystem, NoNewPrivileges, MemoryDenyWriteExecute, etc.)
 - **deny-any** to prevent amplification attacks
@@ -30,7 +30,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - Conservative cache sizes for low-memory environments
 
 ### Compliance
-- **CIS Benchmark** hardening (kernel, SSH, filesystem, services)
+- **CIS Benchmark** hardening (kernel, SSH, filesystem, services, login banners, core dump restrictions)
 - **PCI-DSS** compliance (TLS 1.2+, audit logging, 90-day log retention, access control)
 - Comprehensive audit logging
 - Login banners and access restrictions
@@ -93,8 +93,8 @@ Optional:
                     └─────────────┬───────────────────────┘
                                   │
                     ┌─────────────▼───────────────────────┐
-                    │     nftables Firewall + Rate Limit   │
-                    │   (Connection tracking, Anti-DDoS)   │
+                    │       UFW Firewall + Rate Limit      │
+                    │   (nftables backend, Default-Deny)   │
                     └─────────────┬───────────────────────┘
                                   │
               ┌───────────────────┼───────────────────┐
@@ -134,8 +134,9 @@ Optional:
 | `/etc/unbound/unbound.conf.d/03-doh.conf` | DNS-over-HTTPS configuration |
 | `/etc/unbound/unbound.conf.d/04-blocklist.conf` | Response policy / domain blocklist |
 | `/etc/unbound/blocklist.conf` | Custom domain blocklist entries |
-| `/etc/nftables.conf` | Firewall rules |
-| `/etc/sysctl.d/99-unbound-dns.conf` | Kernel tuning parameters |
+| `/etc/sysctl.d/99-unbound-dns.conf` | DNS performance + CIS kernel security tuning |
+| `/etc/ssh/sshd_config.d/99-cis-hardening.conf` | SSH CIS hardening configuration |
+| `/etc/security/limits.d/99-disable-coredumps.conf` | Core dump restrictions |
 
 ## Management Commands
 
@@ -164,7 +165,7 @@ sudo unbound-checkconf
 sudo unbound-control dump_cache
 
 # View firewall rules
-sudo nft list ruleset
+sudo ufw status verbose
 ```
 
 ## Testing
@@ -190,9 +191,9 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 ## Security Hardening Summary
 
 ### CIS Benchmark Controls
-- [x] Kernel hardening (IP forwarding, source routing, ICMP redirects)
+- [x] Kernel hardening (IP forwarding, source routing, ICMP redirects, SYN cookies)
 - [x] Core dump restrictions
-- [x] SSH hardening (Protocol 2, MaxAuthTries, no root login)
+- [x] SSH hardening (Protocol 2, MaxAuthTries, strong ciphers, no X11 forwarding)
 - [x] File permission hardening
 - [x] Unnecessary services disabled
 - [x] Login banners
@@ -237,7 +238,7 @@ sudo ss -ulnp | grep ':53\s'
 dig @127.0.0.1 +trace example.com
 
 # Check firewall rules
-sudo nft list ruleset
+sudo ufw status verbose
 
 # Check Fail2Ban status
 sudo fail2ban-client status unbound-dns-abuse

@@ -1,52 +1,52 @@
 #!/usr/bin/env bash
 ###############################################################################
-# Enterprise-Grade Unbound Public DNS Installation Script
-# Target: Debian 13 (Trixie) on Azure Standard_B2ats_v2 (2 vCPU / 1 GiB RAM)
+# 企业级 Unbound 公共 DNS 服务器安装脚本
+# 目标环境: Debian 13 (Trixie) / Azure Standard_B2ats_v2 (2 vCPU / 1 GiB RAM)
 #
-# Features:
-#   - DNSSEC validation with automatic root trust-anchor management
-#   - DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443)
-#   - High-performance tuning for low-latency public DNS
-#   - CIS Benchmark and PCI-DSS compliance hardening
-#   - Rate limiting, access control, and anti-amplification
-#   - Systemd service sandboxing
-#   - UFW firewall
-#   - Comprehensive logging and monitoring
-#   - Automatic TLS certificate provisioning (Let's Encrypt)
+# 功能特性:
+#   - DNSSEC 验证及自动根信任锚管理
+#   - DNS-over-TLS (DoT, 端口 853) 和 DNS-over-HTTPS (DoH, 端口 443)
+#   - 针对低延迟公共 DNS 的高性能调优
+#   - CIS 基准和 PCI-DSS 合规加固（内核、SSH、文件系统、服务）
+#   - 速率限制、访问控制和防放大攻击
+#   - Systemd 服务沙箱隔离
+#   - UFW 防火墙（基于 nftables 后端）
+#   - 全面的日志记录和监控
+#   - 自动 TLS 证书配置 (Let's Encrypt)
 #
-# Usage:
-#   sudo bash install_unbound.sh --domain <your-dns-domain> --email <your-email>
+# 用法:
+#   sudo bash install_unbound.sh --domain <你的DNS域名> --email <你的邮箱>
 #
-# Azure Standard_B2ats_v2: 2 vCPU (Arm64), 1 GiB RAM
-# We tune for 2 threads, conservative cache sizes, and aggressive prefetching.
+# Azure Standard_B2ats_v2: 2 vCPU (Arm64), 1 GiB 内存
+# 针对 2 线程、保守缓存大小和积极预取进行优化。
 ###############################################################################
 
 set -euo pipefail
 IFS=$'\n\t'
 
 ###############################################################################
-# Constants & Defaults
+# 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
 BACKUP_DIR="/var/backups/unbound-install-$(date +%Y%m%d%H%M%S)"
 readonly BACKUP_DIR
 
-# Unbound paths
+# Unbound 路径
 readonly UNBOUND_CONF_DIR="/etc/unbound/unbound.conf.d"
 readonly UNBOUND_MAIN_CONF="/etc/unbound/unbound.conf"
 readonly UNBOUND_LOG_DIR="/var/log/unbound"
-# TLS / ACME
+# TLS / ACME 证书目录
 readonly CERT_DIR="/etc/unbound/tls"
 
-# Network defaults
+# 网络端口默认值
 readonly DNS_PORT=53
 readonly DOT_PORT=853
 readonly DOH_PORT=443
 
-# Performance tuning for Standard_B2ats_v2 (2 vCPU, 1 GiB)
+# 性能调优参数 (适配 Standard_B2ats_v2: 2 vCPU, 1 GiB 内存)
 readonly NUM_THREADS=2
 readonly MSG_CACHE_SIZE="32m"
 readonly RRSET_CACHE_SIZE="64m"
@@ -62,20 +62,20 @@ readonly SO_REUSEPORT="yes"
 readonly SO_RCVBUF="4m"
 readonly SO_SNDBUF="4m"
 
-# Rate limiting
+# 速率限制参数
 readonly RATELIMIT=1000
 readonly RATELIMIT_SLABS=2
 readonly IP_RATELIMIT=100
 readonly IP_RATELIMIT_SLABS=2
 
-# Colors for output
+# 终端输出颜色
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
 readonly NC='\033[0m'
 
 ###############################################################################
-# Global Variables (set via CLI args)
+# 全局变量（通过命令行参数设置）
 ###############################################################################
 DOMAIN=""
 EMAIL=""
@@ -83,13 +83,16 @@ SKIP_CERTBOT="false"
 DRY_RUN="false"
 
 ###############################################################################
-# Logging helpers
+# 日志辅助函数
+# 修复: 当日志文件不可写时（例如非 root 用户运行），tee 失败不会导致
+# set -e 终止脚本，确保错误信息能正常显示给用户。
 ###############################################################################
 log() {
     local level="$1"; shift
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
-    printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*" | tee -a "$LOG_FILE"
+    printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*" | tee -a "$LOG_FILE" 2>/dev/null || \
+        printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*"
 }
 info()  { log "INFO"  "$@"; printf "${GREEN}[INFO]${NC}  %s\n" "$*"; }
 warn()  { log "WARN"  "$@"; printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
@@ -98,42 +101,42 @@ fatal() { error "$@"; exit 1; }
 debug() { log "DEBUG" "$@"; }
 
 ###############################################################################
-# Usage
+# 使用说明
 ###############################################################################
 usage() {
     cat <<EOF
-Usage: sudo $SCRIPT_NAME [OPTIONS]
+用法: sudo $SCRIPT_NAME [选项]
 
-Required:
-  --domain <FQDN>      Domain name for TLS certificates (e.g., dns.example.com)
-  --email  <EMAIL>     Email for Let's Encrypt certificate notifications
+必需参数:
+  --domain <域名>       TLS 证书使用的域名 (例如: dns.example.com)
+  --email  <邮箱>       Let's Encrypt 证书通知邮箱
 
-Optional:
-  --skip-certbot        Skip Let's Encrypt certificate provisioning (use self-signed)
-  --dry-run             Show what would be done without making changes
-  -h, --help            Show this help message
-  -v, --version         Show script version
+可选参数:
+  --skip-certbot        跳过 Let's Encrypt 证书配置（使用自签名证书）
+  --dry-run             仅显示将要执行的操作，不做任何更改
+  -h, --help            显示此帮助信息
+  -v, --version         显示脚本版本
 
-Example:
+示例:
   sudo $SCRIPT_NAME --domain dns.example.com --email admin@example.com
 EOF
     exit 0
 }
 
 ###############################################################################
-# Argument Parsing
+# 命令行参数解析
 ###############################################################################
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --domain)
                 DOMAIN="${2:-}"
-                [[ -z "$DOMAIN" ]] && fatal "--domain requires a value"
+                [[ -z "$DOMAIN" ]] && fatal "--domain 参数需要一个值"
                 shift 2
                 ;;
             --email)
                 EMAIL="${2:-}"
-                [[ -z "$EMAIL" ]] && fatal "--email requires a value"
+                [[ -z "$EMAIL" ]] && fatal "--email 参数需要一个值"
                 shift 2
                 ;;
             --skip-certbot)
@@ -148,102 +151,108 @@ parse_args() {
                 usage
                 ;;
             -v|--version)
-                echo "$SCRIPT_NAME version $SCRIPT_VERSION"
+                echo "$SCRIPT_NAME 版本 $SCRIPT_VERSION"
                 exit 0
                 ;;
             *)
-                fatal "Unknown option: $1. Use --help for usage information."
+                fatal "未知选项: $1。使用 --help 查看用法。"
                 ;;
         esac
     done
 
     if [[ -z "$DOMAIN" ]]; then
-        fatal "Missing required parameter --domain. Use --help for usage information."
+        fatal "缺少必需参数 --domain。使用 --help 查看用法。"
     fi
     if [[ -z "$EMAIL" && "$SKIP_CERTBOT" == "false" ]]; then
-        fatal "Missing required parameter --email (needed for Let's Encrypt). Use --skip-certbot to skip."
+        fatal "缺少必需参数 --email（Let's Encrypt 需要）。使用 --skip-certbot 可跳过。"
     fi
 }
 
 ###############################################################################
-# Pre-flight Checks
+# 安装前环境检查
 ###############################################################################
 preflight_checks() {
-    info "Running pre-flight checks..."
+    info "正在执行安装前环境检查..."
 
-    # Must run as root
+    # 必须以 root 权限运行
     if [[ $EUID -ne 0 ]]; then
-        fatal "This script must be run as root (sudo)."
+        fatal "此脚本必须以 root 权限运行 (sudo)。"
     fi
 
-    # Check Debian version
+    # 检查 Debian 版本
     if [[ -f /etc/os-release ]]; then
         # shellcheck source=/dev/null
         source /etc/os-release
         if [[ "${ID:-}" != "debian" ]]; then
-            warn "This script is designed for Debian. Detected: ${ID:-unknown}"
+            warn "此脚本专为 Debian 设计。检测到: ${ID:-unknown}"
         fi
-        info "Detected OS: ${PRETTY_NAME:-unknown}"
+        info "检测到操作系统: ${PRETTY_NAME:-unknown}"
     else
-        warn "Cannot determine OS version (/etc/os-release not found)."
+        warn "无法确定操作系统版本（未找到 /etc/os-release）。"
     fi
 
-    # Check available memory
+    # 检查可用内存
     local mem_total_kb
     mem_total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     local mem_total_mb=$((mem_total_kb / 1024))
-    info "Available memory: ${mem_total_mb} MB"
+    info "可用内存: ${mem_total_mb} MB"
     if [[ $mem_total_mb -lt 512 ]]; then
-        warn "Low memory detected (${mem_total_mb} MB). Cache sizes are already conservative."
+        warn "检测到内存不足（${mem_total_mb} MB）。缓存大小已配置为保守值。"
     fi
 
-    # Check CPU count
+    # 检查 CPU 数量
     local cpu_count
     cpu_count=$(nproc)
-    info "Available CPUs: $cpu_count"
+    info "可用 CPU 核心数: $cpu_count"
 
-    # Check network connectivity
+    # 检查网络连通性
     if ! ping -c 1 -W 3 1.1.1.1 &>/dev/null; then
-        warn "No network connectivity detected. Installation may fail."
+        warn "未检测到网络连接。安装可能会失败。"
     fi
 
-    info "Pre-flight checks passed."
+    info "安装前环境检查通过。"
 }
 
 ###############################################################################
-# Backup Existing Configuration
+# 备份现有配置
 ###############################################################################
 backup_existing() {
-    info "Creating backup directory: $BACKUP_DIR"
+    info "正在创建备份目录: $BACKUP_DIR"
     mkdir -p "$BACKUP_DIR"
 
     if [[ -d /etc/unbound ]]; then
         cp -a /etc/unbound "$BACKUP_DIR/etc_unbound" 2>/dev/null || true
-        info "Backed up existing /etc/unbound"
+        info "已备份 /etc/unbound"
     fi
 
     if [[ -d /etc/ufw ]]; then
         cp -a /etc/ufw "$BACKUP_DIR/etc_ufw" 2>/dev/null || true
-        info "Backed up existing /etc/ufw"
+        info "已备份 /etc/ufw"
     fi
 
-    # Backup sysctl
+    # 备份 sysctl 配置
     if [[ -d /etc/sysctl.d ]]; then
         cp -a /etc/sysctl.d "$BACKUP_DIR/etc_sysctl.d" 2>/dev/null || true
+    fi
+
+    # 备份 SSH 配置
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        cp -a /etc/ssh/sshd_config "$BACKUP_DIR/sshd_config" 2>/dev/null || true
+        info "已备份 /etc/ssh/sshd_config"
     fi
 }
 
 ###############################################################################
-# System Update & Package Installation
+# 系统更新和软件包安装
 ###############################################################################
 install_packages() {
-    info "Updating system packages..."
+    info "正在更新系统软件包..."
     export DEBIAN_FRONTEND=noninteractive
 
     apt-get update -qq
     apt-get upgrade -y -qq
 
-    info "Installing required packages..."
+    info "正在安装必需的软件包..."
     apt-get install -y -qq \
         unbound \
         unbound-anchor \
@@ -269,25 +278,24 @@ install_packages() {
         net-tools \
         sudo
 
-    info "All packages installed successfully."
+    info "所有软件包安装完成。"
 }
 
 ###############################################################################
-# System Tuning for DNS Server Performance
+# DNS 服务器性能调优 + CIS 基准内核安全加固
 ###############################################################################
 tune_system_for_dns() {
-    info "Applying DNS server performance tuning..."
+    info "正在应用 DNS 服务器性能调优和内核安全加固..."
 
-    # --- Kernel parameters for DNS server performance ---
+    # --- DNS 性能和 CIS/PCI-DSS 内核安全参数 ---
     cat > /etc/sysctl.d/99-unbound-dns.conf <<'SYSCTL'
 # =============================================================================
-# Kernel Tuning for Enterprise DNS Server
-# DNS-specific network performance parameters only
-# (System-level CIS/PCI-DSS hardening is managed separately)
+# 企业级 DNS 服务器内核调优参数
+# 包含 DNS 性能优化和 CIS 基准/PCI-DSS 安全加固
 # =============================================================================
 
-# --- Network Performance (DNS traffic optimization) ---
-# Increase socket buffer sizes for high-throughput DNS traffic
+# === 网络性能优化（DNS 流量） ===
+# 增大 socket 缓冲区以支持高吞吐 DNS 流量
 net.core.rmem_max = 8388608
 net.core.wmem_max = 8388608
 net.core.rmem_default = 1048576
@@ -296,7 +304,7 @@ net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 65535
 net.core.optmem_max = 2097152
 
-# TCP tuning (for DoT/DoH connections)
+# TCP 调优（用于 DoT/DoH 连接）
 net.ipv4.tcp_rmem = 4096 1048576 8388608
 net.ipv4.tcp_wmem = 4096 1048576 8388608
 net.ipv4.tcp_max_syn_backlog = 65536
@@ -311,41 +319,109 @@ net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_no_metrics_save = 1
 
-# UDP tuning (for DNS query traffic)
+# UDP 调优（用于 DNS 查询流量）
 net.ipv4.udp_rmem_min = 8192
 net.ipv4.udp_wmem_min = 8192
 
-# --- Memory ---
-# Reduce swappiness for DNS cache performance
+# === 内存 ===
+# 降低交换分区使用倾向以提升 DNS 缓存性能
 vm.swappiness = 10
 
-# --- File descriptors (for high connection count) ---
+# === 文件描述符（支持高并发连接） ===
 fs.file-max = 1048576
+
+# === CIS 基准 - 内核安全加固 ===
+
+# 禁用 IP 转发（CIS 3.1.1）- DNS 服务器不需要路由功能
+net.ipv4.ip_forward = 0
+net.ipv6.conf.all.forwarding = 0
+
+# 禁用 ICMP 重定向发送（CIS 3.1.2）
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+
+# 禁止接受源路由包（CIS 3.2.1）
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+
+# 禁止接受 ICMP 重定向（CIS 3.2.2）
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+
+# 禁止接受安全 ICMP 重定向（CIS 3.2.3）
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+
+# 记录可疑的火星包（CIS 3.2.4）
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# 忽略 ICMP 广播请求（CIS 3.2.5）- 防止 Smurf 攻击
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+# 忽略伪造的 ICMP 错误响应（CIS 3.2.6）
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+# 启用反向路径过滤（CIS 3.2.7）- 防止 IP 欺骗
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# 启用 TCP SYN Cookie（CIS 3.2.8）- 防止 SYN 洪泛攻击
+net.ipv4.tcp_syncookies = 1
+
+# 禁止接受 IPv6 路由通告（CIS 3.3.1）
+net.ipv6.conf.all.accept_ra = 0
+net.ipv6.conf.default.accept_ra = 0
+
+# === CIS 基准 - 进程安全 ===
+
+# 启用 ASLR 地址空间布局随机化（CIS 1.5.3）
+kernel.randomize_va_space = 2
+
+# 禁用核心转储的 SUID 程序（CIS 1.5.1）
+fs.suid_dumpable = 0
+
+# 限制内核指针泄露
+kernel.kptr_restrict = 2
+
+# 限制 dmesg 访问
+kernel.dmesg_restrict = 1
 SYSCTL
 
-    sysctl --system >/dev/null 2>&1 || warn "Some sysctl parameters may not have applied."
-    info "DNS performance kernel parameters applied."
+    sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 参数可能未成功应用。"
+    info "DNS 性能调优和内核安全加固参数已应用。"
+
+    # --- 核心转储限制（CIS 1.5.1）---
+    cat > /etc/security/limits.d/99-disable-coredumps.conf <<'EOF'
+# 禁用核心转储 - CIS 基准 1.5.1
+* hard core 0
+EOF
+    info "核心转储已禁用。"
 }
 
 ###############################################################################
-# Create Unbound User & Directories
+# 创建 Unbound 用户和目录
 ###############################################################################
 setup_unbound_dirs() {
-    info "Setting up Unbound directories and permissions..."
+    info "正在设置 Unbound 目录和权限..."
 
-    # Ensure unbound user exists (usually created by package)
+    # 确保 unbound 用户存在（通常由软件包自动创建）
     if ! id -u unbound &>/dev/null; then
         useradd -r -s /usr/sbin/nologin -d /etc/unbound unbound
-        info "Created unbound system user."
+        info "已创建 unbound 系统用户。"
     fi
 
-    # Create required directories
+    # 创建必需的目录
     mkdir -p "$UNBOUND_CONF_DIR"
     mkdir -p "$UNBOUND_LOG_DIR"
     mkdir -p "$CERT_DIR"
     mkdir -p /var/lib/unbound
 
-    # Set ownership and permissions
+    # 设置目录所有者和权限
     chown -R unbound:unbound "$UNBOUND_LOG_DIR"
     chmod 750 "$UNBOUND_LOG_DIR"
     chown -R unbound:unbound "$CERT_DIR"
@@ -353,43 +429,43 @@ setup_unbound_dirs() {
     chown -R unbound:unbound /var/lib/unbound
     chmod 750 /var/lib/unbound
 
-    info "Directories configured."
+    info "目录配置完成。"
 }
 
 ###############################################################################
-# DNSSEC Root Trust Anchor
+# DNSSEC 根信任锚配置
 ###############################################################################
 setup_dnssec() {
-    info "Configuring DNSSEC trust anchors..."
+    info "正在配置 DNSSEC 信任锚..."
 
-    # Fetch fresh root hints
+    # 下载最新的根提示文件
     local root_hints="/var/lib/unbound/root.hints"
     if curl -sSf -o "$root_hints" https://www.internic.net/domain/named.root; then
-        info "Downloaded fresh root hints."
+        info "已下载最新的根提示文件。"
     else
-        warn "Could not download root hints. Using system default."
+        warn "无法下载根提示文件，使用系统默认值。"
         cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
     fi
     chown unbound:unbound "$root_hints"
     chmod 644 "$root_hints"
 
-    # Initialize/update root trust anchor
+    # 初始化/更新根信任锚
     local anchor_file="/var/lib/unbound/root.key"
     unbound-anchor -a "$anchor_file" 2>/dev/null || true
     chown unbound:unbound "$anchor_file"
     chmod 644 "$anchor_file"
 
-    info "DNSSEC trust anchors configured."
+    info "DNSSEC 信任锚配置完成。"
 }
 
 ###############################################################################
-# TLS Certificate Setup
+# TLS 证书配置
 ###############################################################################
 setup_tls() {
-    info "Setting up TLS certificates..."
+    info "正在设置 TLS 证书..."
 
     if [[ "$SKIP_CERTBOT" == "true" ]]; then
-        info "Generating self-signed TLS certificate..."
+        info "正在生成自签名 TLS 证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
             -keyout "$CERT_DIR/privkey.pem" \
             -out "$CERT_DIR/fullchain.pem" \
@@ -400,19 +476,19 @@ setup_tls() {
         chown unbound:unbound "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
         chmod 640 "$CERT_DIR/privkey.pem"
         chmod 644 "$CERT_DIR/fullchain.pem"
-        info "Self-signed certificate generated."
+        info "自签名证书已生成。"
     else
-        info "Provisioning Let's Encrypt certificate for $DOMAIN..."
+        info "正在为 $DOMAIN 配置 Let's Encrypt 证书..."
 
-        # If ufw is already active, temporarily allow port 80 for ACME challenge
+        # 如果 UFW 已激活，临时开放 80 端口用于 ACME 验证
         local ufw_was_active="false"
         if ufw status 2>/dev/null | grep -q "Status: active"; then
             ufw_was_active="true"
             ufw allow 80/tcp >/dev/null 2>&1
-            info "Temporarily opened port 80 for ACME challenge."
+            info "已临时开放 80 端口用于 ACME 验证。"
         fi
 
-        # Request certificate using standalone mode
+        # 使用 standalone 模式申请证书
         certbot certonly --standalone \
             --non-interactive \
             --agree-tos \
@@ -421,90 +497,90 @@ setup_tls() {
             --preferred-challenges http \
             --key-type ecdsa \
             --elliptic-curve secp256r1 \
-            || fatal "Certbot failed. Use --skip-certbot for self-signed certificates."
+            || fatal "Certbot 失败。使用 --skip-certbot 可改用自签名证书。"
 
-        # Close temporary port 80 if we opened it
+        # 如果之前打开了临时端口，现在关闭
         if [[ "$ufw_was_active" == "true" ]]; then
             ufw delete allow 80/tcp >/dev/null 2>&1
-            info "Closed temporary port 80."
+            info "已关闭临时 80 端口。"
         fi
 
-        # Copy certificates to Unbound TLS directory
+        # 复制证书到 Unbound TLS 目录
         cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
         cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$CERT_DIR/privkey.pem"
         chown unbound:unbound "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
         chmod 640 "$CERT_DIR/privkey.pem"
         chmod 644 "$CERT_DIR/fullchain.pem"
 
-        # Set up certbot renewal hooks (Debian certbot.timer handles renewal scheduling)
+        # 设置 certbot 续期钩子（Debian certbot.timer 负责续期调度）
         mkdir -p /etc/letsencrypt/renewal-hooks/pre
         mkdir -p /etc/letsencrypt/renewal-hooks/post
         mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 
-        # Pre-hook: open port 80 for ACME challenge
+        # 续期前钩子：开放 80 端口用于 ACME 验证
         cat > /etc/letsencrypt/renewal-hooks/pre/open-firewall.sh <<'PREHOOK'
 #!/usr/bin/env bash
 ufw allow 80/tcp >/dev/null 2>&1 || true
 PREHOOK
         chmod 755 /etc/letsencrypt/renewal-hooks/pre/open-firewall.sh
 
-        # Post-hook: close port 80 after renewal
+        # 续期后钩子：关闭 80 端口
         cat > /etc/letsencrypt/renewal-hooks/post/close-firewall.sh <<'POSTHOOK'
 #!/usr/bin/env bash
 ufw delete allow 80/tcp >/dev/null 2>&1 || true
 POSTHOOK
         chmod 755 /etc/letsencrypt/renewal-hooks/post/close-firewall.sh
 
-        # Deploy-hook: copy certs and reload Unbound
+        # 部署钩子：复制证书并重载 Unbound
         cat > /etc/letsencrypt/renewal-hooks/deploy/update-unbound-certs.sh <<EOF
 #!/usr/bin/env bash
-cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $CERT_DIR/fullchain.pem
-cp /etc/letsencrypt/live/$DOMAIN/privkey.pem $CERT_DIR/privkey.pem
-chown unbound:unbound $CERT_DIR/*.pem
-chmod 640 $CERT_DIR/privkey.pem
-chmod 644 $CERT_DIR/fullchain.pem
+cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
+cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$CERT_DIR/privkey.pem"
+chown unbound:unbound "$CERT_DIR"/*.pem
+chmod 640 "$CERT_DIR/privkey.pem"
+chmod 644 "$CERT_DIR/fullchain.pem"
 systemctl reload unbound 2>/dev/null || true
 EOF
         chmod 755 /etc/letsencrypt/renewal-hooks/deploy/update-unbound-certs.sh
 
-        info "Let's Encrypt certificate provisioned with auto-renewal hooks."
+        info "Let's Encrypt 证书已配置，自动续期钩子已就绪。"
     fi
 }
 
 ###############################################################################
-# Generate Unbound Configuration
+# 生成 Unbound 配置文件
 ###############################################################################
 configure_unbound() {
-    info "Generating Unbound configuration..."
+    info "正在生成 Unbound 配置..."
 
-    # --- Main configuration ---
+    # --- 主配置文件 ---
     cat > "$UNBOUND_MAIN_CONF" <<'EOF'
 # =============================================================================
-# Unbound Main Configuration
-# Enterprise-Grade Public DNS Server
+# Unbound 主配置文件
+# 企业级公共 DNS 服务器
 # =============================================================================
-# Include modular configuration files
+# 引入模块化配置文件
 include-toplevel: "/etc/unbound/unbound.conf.d/*.conf"
 EOF
 
-    # --- Server configuration ---
+    # --- 服务器核心配置 ---
     cat > "$UNBOUND_CONF_DIR/01-server.conf" <<EOF
 # =============================================================================
-# Server Core Configuration
-# Optimized for Azure Standard_B2ats_v2 (2 vCPU, 1 GiB RAM)
+# 服务器核心配置
+# 针对 Azure Standard_B2ats_v2 (2 vCPU, 1 GiB 内存) 优化
 # =============================================================================
 server:
-    # --- Interface Binding ---
+    # --- 接口绑定 ---
     interface: 0.0.0.0@${DNS_PORT}
     interface: ::0@${DNS_PORT}
     interface: 0.0.0.0@${DOT_PORT}
     interface: ::0@${DOT_PORT}
 
-    # --- Access Control (Public DNS) ---
+    # --- 访问控制（公共 DNS）---
     access-control: 0.0.0.0/0 allow
     access-control: ::0/0 allow
 
-    # Refuse queries for private/bogon ranges to prevent rebinding attacks
+    # 拒绝查询私有/伪造地址范围以防止 DNS 重绑定攻击
     private-address: 10.0.0.0/8
     private-address: 172.16.0.0/12
     private-address: 192.168.0.0/16
@@ -512,27 +588,27 @@ server:
     private-address: fd00::/8
     private-address: fe80::/10
 
-    # --- Protocol Settings ---
+    # --- 协议设置 ---
     do-ip4: yes
     do-ip6: yes
     do-udp: yes
     do-tcp: yes
     prefer-ip6: no
 
-    # --- TLS (DNS-over-TLS on port 853) ---
+    # --- TLS (DNS-over-TLS 端口 853) ---
     tls-service-key: "${CERT_DIR}/privkey.pem"
     tls-service-pem: "${CERT_DIR}/fullchain.pem"
     tls-port: ${DOT_PORT}
-    # Use strong TLS ciphers only (PCI-DSS requirement)
-    # TLS 1.2 cipher suites (OpenSSL format)
+    # 仅使用强加密套件（PCI-DSS 要求）
+    # TLS 1.2 加密套件（OpenSSL 格式）
     tls-ciphers: "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
-    # TLS 1.3 cipher suites
+    # TLS 1.3 加密套件
     tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-    # Minimum TLS 1.2 (PCI-DSS 3.2.1 requires TLS 1.2+)
+    # 最低 TLS 1.2（PCI-DSS 3.2.1 要求 TLS 1.2+）
     tls-upstream: no
     incoming-num-tcp: 1024
 
-    # --- Performance Tuning ---
+    # --- 性能调优 ---
     num-threads: ${NUM_THREADS}
     msg-cache-size: ${MSG_CACHE_SIZE}
     rrset-cache-size: ${RRSET_CACHE_SIZE}
@@ -548,26 +624,26 @@ server:
     so-rcvbuf: ${SO_RCVBUF}
     so-sndbuf: ${SO_SNDBUF}
 
-    # Faster UDP with connected sockets
+    # 使用连接式 UDP socket 提升速度
     udp-connect: yes
 
-    # --- Cache Optimization ---
-    # Prefetch almost-expired entries (reduces latency for popular queries)
+    # --- 缓存优化 ---
+    # 预取即将过期的条目（降低热门查询的延迟）
     prefetch: yes
     prefetch-key: yes
 
-    # Serve stale data while refreshing (improves availability)
+    # 刷新时提供过期数据（零停机缓存）
     serve-expired: yes
     serve-expired-ttl: 86400
     serve-expired-client-timeout: 1800
     serve-expired-reply-ttl: 30
 
-    # Cache minimum/maximum TTLs
+    # 缓存最小/最大 TTL
     cache-min-ttl: 60
     cache-max-ttl: 86400
     cache-max-negative-ttl: 300
 
-    # Infrastructure cache
+    # 基础设施缓存
     infra-host-ttl: 900
     infra-cache-numhosts: 50000
     infra-cache-min-rtt: 50
@@ -576,19 +652,19 @@ server:
     auto-trust-anchor-file: "/var/lib/unbound/root.key"
     root-hints: "/var/lib/unbound/root.hints"
 
-    # Harden DNSSEC validation
+    # 加固 DNSSEC 验证
     val-clean-additional: yes
     val-permissive-mode: no
     val-log-level: 1
 
-    # --- Security Hardening ---
-    # Hide server identity (CIS)
+    # --- 安全加固 ---
+    # 隐藏服务器身份（CIS 要求）
     hide-identity: yes
     hide-version: yes
     identity: ""
     version: ""
 
-    # Harden against protocol exploitation
+    # 加固协议防护
     harden-glue: yes
     harden-dnssec-stripped: yes
     harden-below-nxdomain: yes
@@ -598,29 +674,29 @@ server:
     harden-short-bufsize: yes
     harden-unknown-additional: yes
 
-    # Use 0x20-encoded random bits in the query to foil spoofing
+    # 使用 0x20 编码的随机位来防止欺骗
     use-caps-for-id: yes
 
-    # Minimal responses (reduces amplification attack surface)
+    # 最小化响应（减少放大攻击面）
     minimal-responses: yes
 
-    # QNAME minimisation (privacy enhancement, RFC 7816)
+    # QNAME 最小化（隐私增强，RFC 7816）
     qname-minimisation: yes
     qname-minimisation-strict: no
 
-    # Deny queries of type ANY (anti-amplification)
+    # 拒绝 ANY 类型查询（防止放大攻击）
     deny-any: yes
 
-    # EDNS buffer size (prevent fragmentation-based attacks)
+    # EDNS 缓冲区大小（防止基于分片的攻击）
     edns-buffer-size: 1232
 
-    # Maximum UDP response size
+    # 最大 UDP 响应大小
     max-udp-size: 1232
 
-    # --- Aggressive NSEC (RFC 8198) ---
+    # --- 积极 NSEC (RFC 8198) ---
     aggressive-nsec: yes
 
-    # --- Rate Limiting ---
+    # --- 速率限制 ---
     ratelimit: ${RATELIMIT}
     ratelimit-slabs: ${RATELIMIT_SLABS}
     ratelimit-size: 4m
@@ -628,7 +704,7 @@ server:
     ip-ratelimit-slabs: ${IP_RATELIMIT_SLABS}
     ip-ratelimit-size: 4m
 
-    # --- Logging (PCI-DSS: comprehensive audit logging) ---
+    # --- 日志记录（PCI-DSS: 全面审计日志）---
     use-syslog: no
     logfile: "${UNBOUND_LOG_DIR}/unbound.log"
     verbosity: 1
@@ -639,24 +715,24 @@ server:
     log-servfail: yes
     log-time-ascii: yes
 
-    # --- Process Settings ---
+    # --- 进程设置 ---
     username: "unbound"
     directory: "/etc/unbound"
     chroot: ""
     pidfile: "/run/unbound/unbound.pid"
 
-    # --- Misc ---
+    # --- 其他 ---
     unwanted-reply-threshold: 10000000
     do-not-query-localhost: yes
     ede: yes
     ede-serve-expired: yes
 EOF
 
-    # --- Remote Control Configuration ---
+    # --- 远程控制配置 ---
     cat > "$UNBOUND_CONF_DIR/02-remote-control.conf" <<'EOF'
 # =============================================================================
-# Remote Control Configuration
-# Only accessible from localhost for security
+# 远程控制配置
+# 仅允许本地访问以确保安全
 # =============================================================================
 remote-control:
     control-enable: yes
@@ -670,61 +746,60 @@ remote-control:
     control-cert-file: "/etc/unbound/unbound_control.pem"
 EOF
 
-    # Generate unbound-control keys
-    unbound-control-setup 2>/dev/null || warn "unbound-control-setup had warnings"
-    info "Unbound configuration generated."
+    # 生成 unbound-control 密钥
+    unbound-control-setup 2>/dev/null || warn "unbound-control-setup 存在警告"
+    info "Unbound 配置生成完成。"
 }
 
 ###############################################################################
-# Configure DoH (DNS-over-HTTPS) via unbound module
+# 配置 DoH (DNS-over-HTTPS)
 ###############################################################################
 configure_doh() {
-    info "Configuring DNS-over-HTTPS (DoH) support..."
+    info "正在配置 DNS-over-HTTPS (DoH) 支持..."
 
-    # Unbound 1.20+ has built-in HTTPS support via the https-port directive
-    # Add DoH configuration using unbound's native HTTPS support
+    # Unbound 1.20+ 内置 HTTPS 支持，使用 https-port 指令
     cat > "$UNBOUND_CONF_DIR/03-doh.conf" <<EOF
 # =============================================================================
-# DNS-over-HTTPS (DoH) Configuration
+# DNS-over-HTTPS (DoH) 配置
 # =============================================================================
 server:
-    # HTTPS listener (DoH)
+    # HTTPS 监听端口 (DoH)
     https-port: ${DOH_PORT}
     http-endpoint: "/dns-query"
     http-notls-downstream: no
 EOF
 
-    info "DoH configured on port ${DOH_PORT} at /dns-query"
+    info "DoH 已配置在端口 ${DOH_PORT}，路径 /dns-query"
 }
 
 ###############################################################################
-# Blocklist / RPZ (Optional but enterprise-standard)
+# 域名黑名单 / RPZ（响应策略区域，企业标准配置）
 ###############################################################################
 configure_rpz() {
-    info "Setting up DNS response policy zone (RPZ) for threat blocking..."
+    info "正在设置 DNS 响应策略区域 (RPZ) 用于威胁域名拦截..."
 
-    # Create a local blocklist file
+    # 创建本地黑名单文件
     cat > /etc/unbound/blocklist.conf <<'EOF'
 # =============================================================================
-# Local DNS Blocklist
-# Add domains to block here, one per line:
+# 本地 DNS 黑名单
+# 在此添加需要拦截的域名，每行一条:
 # local-zone: "malware-domain.com." always_refuse
 # =============================================================================
 
-# Block known malware command-and-control domains (examples)
+# 拦截已知的恶意软件指挥控制域名（示例）
 # local-zone: "example-malware.com." always_refuse
 # local-zone: "bad-actor.net." always_refuse
 EOF
 
     cat > "$UNBOUND_CONF_DIR/04-blocklist.conf" <<'EOF'
 # =============================================================================
-# Response Policy / Blocklist Integration
+# 响应策略 / 黑名单集成
 # =============================================================================
 server:
-    # Include local blocklist
+    # 引入本地黑名单
     include: "/etc/unbound/blocklist.conf"
 
-    # Block reverse lookups for private addresses
+    # 拦截私有地址的反向查询
     local-zone: "10.in-addr.arpa." nodefault
     local-zone: "16.172.in-addr.arpa." nodefault
     local-zone: "17.172.in-addr.arpa." nodefault
@@ -746,55 +821,55 @@ server:
     local-zone: "254.169.in-addr.arpa." nodefault
 EOF
 
-    info "RPZ blocklist configured."
+    info "RPZ 黑名单配置完成。"
 }
 
 ###############################################################################
-# UFW Firewall Configuration
+# UFW 防火墙配置
 ###############################################################################
 configure_firewall() {
-    info "Configuring ufw firewall..."
+    info "正在配置 UFW 防火墙..."
 
-    # Reset ufw to clean state (non-interactive)
+    # 重置 UFW 到干净状态（非交互式）
     ufw --force reset >/dev/null 2>&1
 
-    # Default policies: deny incoming, allow outgoing
+    # 默认策略：拒绝入站，允许出站
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
 
-    # SSH with rate limiting (limits to 6 connections per 30 seconds per IP)
+    # SSH 速率限制（每个 IP 每 30 秒限制 6 次连接）
     ufw limit ssh/tcp >/dev/null 2>&1
 
-    # DNS (UDP and TCP port 53)
+    # DNS (UDP 和 TCP 端口 53)
     ufw allow 53/tcp >/dev/null 2>&1
     ufw allow 53/udp >/dev/null 2>&1
 
-    # DNS-over-TLS (port 853)
+    # DNS-over-TLS (端口 853)
     ufw allow 853/tcp >/dev/null 2>&1
 
-    # DNS-over-HTTPS (port 443)
+    # DNS-over-HTTPS (端口 443)
     ufw allow 443/tcp >/dev/null 2>&1
 
-    # Enable logging (medium level for audit purposes)
+    # 启用日志记录（中等级别用于审计）
     ufw logging medium >/dev/null 2>&1
 
-    # Enable ufw (non-interactive)
+    # 启用 UFW（非交互式）
     ufw --force enable >/dev/null 2>&1
 
-    info "UFW firewall configured and active."
-    info "Allowed ports: SSH(22/tcp-limited), DNS(53/tcp+udp), DoT(853/tcp), DoH(443/tcp)"
+    info "UFW 防火墙已配置并激活。"
+    info "已开放端口: SSH(22/tcp-限速), DNS(53/tcp+udp), DoT(853/tcp), DoH(443/tcp)"
 }
 
 ###############################################################################
-# Fail2Ban Configuration for DNS
+# Fail2Ban DNS 防护配置
 ###############################################################################
 configure_fail2ban() {
-    info "Configuring Fail2Ban for DNS abuse protection..."
+    info "正在配置 Fail2Ban DNS 滥用防护..."
 
-    # Create DNS-specific jail
+    # 创建 DNS 专用监控规则
     cat > /etc/fail2ban/jail.d/unbound-dns.conf <<'EOF'
 # =============================================================================
-# Fail2Ban Jail for DNS Abuse
+# Fail2Ban DNS 滥用防护监控规则
 # =============================================================================
 [unbound-dns-abuse]
 enabled  = true
@@ -808,13 +883,13 @@ bantime  = 3600
 banaction = ufw
 EOF
 
-    # Create filter to match Unbound rate-limit and error log entries
-    # Unbound logs rate-limit events as: "[timestamp] unbound[pid:tid] info: ratelimit for <IP> ..."
+    # 创建过滤器以匹配 Unbound 速率限制和错误日志条目
+    # Unbound 日志格式: [timestamp] unbound[pid:tid] info: ratelimit for <IP> ...
     cat > /etc/fail2ban/filter.d/unbound-dns-abuse.conf <<'EOF'
 # =============================================================================
-# Fail2Ban Filter for Unbound DNS Abuse
-# Matches rate-limit violations logged by Unbound (verbosity >= 0)
-# Log format: [timestamp] unbound[pid:tid] info: ratelimit for <IP> ...
+# Fail2Ban Unbound DNS 滥用过滤器
+# 匹配 Unbound 记录的速率限制违规（verbosity >= 0）
+# 日志格式: [timestamp] unbound[pid:tid] info: ratelimit for <IP> ...
 # =============================================================================
 [Definition]
 failregex = ^.+\bunbound\[\d+:\d+\] info: ratelimit for <HOST>\b.*$
@@ -823,16 +898,16 @@ ignoreregex =
 EOF
 
     systemctl enable fail2ban
-    systemctl restart fail2ban 2>/dev/null || warn "Fail2Ban restart had issues (will start after reboot)"
+    systemctl restart fail2ban 2>/dev/null || warn "Fail2Ban 重启遇到问题（将在重启后启动）"
 
-    info "Fail2Ban configured."
+    info "Fail2Ban 配置完成。"
 }
 
 ###############################################################################
-# Log Rotation
+# 日志轮转配置
 ###############################################################################
 configure_logrotate() {
-    info "Configuring log rotation..."
+    info "正在配置日志轮转..."
 
     cat > /etc/logrotate.d/unbound <<'EOF'
 /var/log/unbound/unbound.log {
@@ -850,35 +925,35 @@ configure_logrotate() {
 }
 EOF
 
-    info "Log rotation configured (90-day retention for PCI-DSS compliance)."
+    info "日志轮转已配置（保留 90 天以满足 PCI-DSS 合规要求）。"
 }
 
 ###############################################################################
-# Systemd Service Hardening
+# Systemd 服务安全加固
 ###############################################################################
 harden_systemd_service() {
-    info "Hardening Unbound systemd service..."
+    info "正在加固 Unbound systemd 服务..."
 
-    # Create systemd override
+    # 创建 systemd 覆盖配置
     mkdir -p /etc/systemd/system/unbound.service.d
 
     cat > /etc/systemd/system/unbound.service.d/hardening.conf <<'EOF'
 # =============================================================================
-# Unbound Systemd Service Hardening
-# CIS / PCI-DSS Compliance
+# Unbound Systemd 服务安全加固
+# CIS / PCI-DSS 合规配置
 # =============================================================================
 [Service]
-# --- Filesystem ---
+# --- 文件系统隔离 ---
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/var/log/unbound /var/lib/unbound /run/unbound
 
-# --- Capabilities ---
+# --- 权能限制 ---
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SYS_RESOURCE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
-# --- Security ---
+# --- 安全策略 ---
 NoNewPrivileges=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -894,56 +969,56 @@ MemoryDenyWriteExecute=yes
 RemoveIPC=yes
 PrivateDevices=yes
 
-# --- System calls ---
+# --- 系统调用过滤 ---
 SystemCallFilter=@system-service
 SystemCallFilter=~@mount @reboot @swap @module @obsolete @clock @cpu-emulation @debug @raw-io
 SystemCallArchitectures=native
 SystemCallErrorNumber=EPERM
 
-# --- Network ---
+# --- 网络限制 ---
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
-# --- Misc ---
+# --- 其他 ---
 UMask=0027
 
-# --- Resource Limits ---
+# --- 资源限制 ---
 LimitNOFILE=65535
 LimitNPROC=512
 
-# --- Restart Policy ---
+# --- 重启策略 ---
 Restart=always
 RestartSec=5
 WatchdogSec=60
 EOF
 
-    # Ensure PID directory exists
+    # 确保 PID 目录存在
     mkdir -p /run/unbound
     chown unbound:unbound /run/unbound
 
-    # Create tmpfiles.d entry for /run/unbound
+    # 创建 tmpfiles.d 条目确保重启后 /run/unbound 自动创建
     cat > /etc/tmpfiles.d/unbound.conf <<'EOF'
 d /run/unbound 0755 unbound unbound -
 EOF
 
     systemctl daemon-reload
-    info "Systemd service hardening applied."
+    info "Systemd 服务安全加固已应用。"
 }
 
 ###############################################################################
-# Monitoring & Health Check Script
+# 监控和健康检查脚本
 ###############################################################################
 create_monitoring_scripts() {
-    info "Creating monitoring and health check scripts..."
+    info "正在创建监控和健康检查脚本..."
 
-    # --- Health Check Script ---
+    # --- 健康检查脚本 ---
     cat > /usr/local/bin/unbound-health-check <<'HEALTHCHECK'
 #!/usr/bin/env bash
 ###############################################################################
-# Unbound Health Check Script
-# Returns 0 on success, 1 on failure
+# Unbound 健康检查脚本
+# 成功返回 0，失败返回 1
 ###############################################################################
-# NOTE: Do not use "set -e" here — we intentionally run commands that may
-# fail and capture their exit status for reporting.
+# 注意: 此处不使用 "set -e"，因为我们故意运行可能失败的命令
+# 并捕获它们的退出状态用于报告。
 set -uo pipefail
 
 CHECKS_PASSED=0
@@ -955,55 +1030,55 @@ check() {
     local result="$2"
     if [[ "$result" == "0" ]]; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
-        [[ "$VERBOSE" == "-v" ]] && echo "[PASS] $name"
+        [[ "$VERBOSE" == "-v" ]] && echo "[通过] $name"
     else
         CHECKS_FAILED=$((CHECKS_FAILED + 1))
-        echo "[FAIL] $name"
+        echo "[失败] $name"
     fi
 }
 
-# Check 1: Service is running
+# 检查 1: 服务是否运行
 systemctl is-active --quiet unbound 2>/dev/null
-check "Unbound service active" "$?"
+check "Unbound 服务运行状态" "$?"
 
-# Check 2: Port 53 is listening
+# 检查 2: 端口 53 是否监听
 ss -ulnp | grep -q ':53 ' 2>/dev/null
-check "Port 53 (UDP) listening" "$?"
+check "端口 53 (UDP) 监听状态" "$?"
 
 ss -tlnp | grep -q ':53 ' 2>/dev/null
-check "Port 53 (TCP) listening" "$?"
+check "端口 53 (TCP) 监听状态" "$?"
 
-# Check 3: Port 853 is listening (DoT)
+# 检查 3: 端口 853 是否监听 (DoT)
 ss -tlnp | grep -q ':853 ' 2>/dev/null
-check "Port 853 (DoT) listening" "$?"
+check "端口 853 (DoT) 监听状态" "$?"
 
-# Check 4: Port 443 is listening (DoH)
+# 检查 4: 端口 443 是否监听 (DoH)
 ss -tlnp | grep -q ':443 ' 2>/dev/null
-check "Port 443 (DoH) listening" "$?"
+check "端口 443 (DoH) 监听状态" "$?"
 
-# Check 5: DNS resolution works
+# 检查 5: DNS 解析是否正常
 dig @127.0.0.1 +short +time=5 +tries=2 example.com A >/dev/null 2>&1
-check "DNS resolution (A record)" "$?"
+check "DNS 解析 (A 记录)" "$?"
 
-# Check 6: DNSSEC validation works
+# 检查 6: DNSSEC 验证是否正常
 dig @127.0.0.1 +dnssec +short +time=5 +tries=2 example.com A >/dev/null 2>&1
-check "DNSSEC resolution" "$?"
+check "DNSSEC 解析" "$?"
 
-# Check 7: DNSSEC validation rejects bad signatures
+# 检查 7: DNSSEC 是否拒绝无效签名
 dnssec_fail=$(dig @127.0.0.1 +time=5 +tries=2 dnssec-failed.org A 2>&1 | grep -c "SERVFAIL" || true)
 if [[ "$dnssec_fail" -ge 1 ]]; then
-    check "DNSSEC rejects bad signatures" "0"
+    check "DNSSEC 拒绝无效签名" "0"
 else
-    check "DNSSEC rejects bad signatures" "1"
+    check "DNSSEC 拒绝无效签名" "1"
 fi
 
-# Check 8: unbound-control works
+# 检查 8: unbound-control 是否正常
 unbound-control status >/dev/null 2>&1
-check "unbound-control operational" "$?"
+check "unbound-control 运行状态" "$?"
 
-# Summary
+# 汇总报告
 echo ""
-echo "Health Check Summary: ${CHECKS_PASSED} passed, ${CHECKS_FAILED} failed"
+echo "健康检查汇总: ${CHECKS_PASSED} 项通过, ${CHECKS_FAILED} 项失败"
 
 if [[ $CHECKS_FAILED -gt 0 ]]; then
     exit 1
@@ -1013,33 +1088,33 @@ HEALTHCHECK
 
     chmod 755 /usr/local/bin/unbound-health-check
 
-    # --- Statistics Collection Script ---
+    # --- 统计信息收集脚本 ---
     cat > /usr/local/bin/unbound-stats <<'STATS'
 #!/usr/bin/env bash
 ###############################################################################
-# Unbound Statistics Collection
+# Unbound 统计信息收集
 ###############################################################################
 set -euo pipefail
 
-echo "=== Unbound Server Statistics ==="
-echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "=== Unbound 服务器统计信息 ==="
+echo "时间戳: $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
-# Get stats
+# 获取统计数据
 unbound-control stats_noreset 2>/dev/null | grep -E \
     "^(total|time|mem|num)" | while IFS='=' read -r key value; do
     printf "%-45s %s\n" "$key" "$value"
 done
 
 echo ""
-echo "=== Cache Statistics ==="
+echo "=== 缓存统计 ==="
 unbound-control stats_noreset 2>/dev/null | grep -E "^(rrset|msg|key|infra)" | \
     while IFS='=' read -r key value; do
     printf "%-45s %s\n" "$key" "$value"
 done
 
 echo ""
-echo "=== Rate Limit Statistics ==="
+echo "=== 速率限制统计 ==="
 unbound-control stats_noreset 2>/dev/null | grep -E "ratelimit" | \
     while IFS='=' read -r key value; do
     printf "%-45s %s\n" "$key" "$value"
@@ -1048,12 +1123,12 @@ STATS
 
     chmod 755 /usr/local/bin/unbound-stats
 
-    # --- Root Hints Update Script (monthly cron) ---
+    # --- 根提示更新脚本（每月定时任务）---
     cat > /usr/local/bin/update-root-hints <<'ROOTHINTS'
 #!/usr/bin/env bash
 ###############################################################################
-# Update DNS Root Hints
-# Run monthly via cron
+# 更新 DNS 根提示文件
+# 通过 cron 每月执行
 ###############################################################################
 set -euo pipefail
 
@@ -1066,73 +1141,73 @@ if curl -sSf -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
         chown unbound:unbound "$ROOT_HINTS"
         chmod 644 "$ROOT_HINTS"
         unbound-control reload 2>/dev/null || systemctl reload unbound
-        logger -t "root-hints-update" "Root hints updated successfully"
+        logger -t "root-hints-update" "根提示文件更新成功"
     else
         rm -f "$TEMP_FILE"
-        logger -t "root-hints-update" "Downloaded file was empty, skipping update"
+        logger -t "root-hints-update" "下载的文件为空，跳过更新"
     fi
 else
     rm -f "$TEMP_FILE"
-    logger -t "root-hints-update" "Failed to download root hints"
+    logger -t "root-hints-update" "下载根提示文件失败"
 fi
 ROOTHINTS
 
     chmod 755 /usr/local/bin/update-root-hints
 
-    # Monthly cron for root hints update
+    # 每月定时更新根提示文件
     cat > /etc/cron.d/update-root-hints <<'EOF'
-# Update DNS root hints monthly
+# 每月更新 DNS 根提示文件
 0 3 1 * * root /usr/local/bin/update-root-hints
 EOF
     chmod 644 /etc/cron.d/update-root-hints
 
-    # --- DNSSEC Trust Anchor Update (weekly cron) ---
+    # --- DNSSEC 信任锚更新（每周定时任务）---
     cat > /etc/cron.d/unbound-anchor <<'EOF'
-# Update DNSSEC trust anchor weekly
+# 每周更新 DNSSEC 信任锚
 0 4 * * 0 root /usr/sbin/unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null; systemctl reload unbound 2>/dev/null || true
 EOF
     chmod 644 /etc/cron.d/unbound-anchor
 
-    info "Monitoring and maintenance scripts created."
+    info "监控和维护脚本创建完成。"
 }
 
 ###############################################################################
-# Validate Configuration
+# 验证配置文件
 ###############################################################################
 validate_config() {
-    info "Validating Unbound configuration..."
+    info "正在验证 Unbound 配置..."
 
     if unbound-checkconf "$UNBOUND_MAIN_CONF"; then
-        info "Configuration validation PASSED."
+        info "配置文件验证通过。"
     else
-        fatal "Configuration validation FAILED. Check $UNBOUND_MAIN_CONF"
+        fatal "配置文件验证失败。请检查 $UNBOUND_MAIN_CONF"
     fi
 }
 
 ###############################################################################
-# Start & Enable Unbound
+# 启动并启用 Unbound
 ###############################################################################
 start_unbound() {
-    info "Starting Unbound DNS server..."
+    info "正在启动 Unbound DNS 服务器..."
 
-    # Stop systemd-resolved if running (conflicts with port 53)
+    # 如果 systemd-resolved 正在运行则停止它（与端口 53 冲突）
     if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
         systemctl disable --now systemd-resolved
-        # Update resolv.conf to use localhost
+        # 更新 resolv.conf 使用本地 DNS
         rm -f /etc/resolv.conf
         cat > /etc/resolv.conf <<'EOF'
-# Managed by Unbound DNS installer
+# 由 Unbound DNS 安装脚本管理
 nameserver 127.0.0.1
 nameserver ::1
 options edns0 trust-ad
 EOF
-        info "Disabled systemd-resolved and updated resolv.conf"
+        info "已禁用 systemd-resolved 并更新 resolv.conf"
     fi
 
     systemctl enable unbound
     systemctl restart unbound
 
-    # Wait for service to be ready
+    # 等待服务就绪
     local retries=10
     while [[ $retries -gt 0 ]]; do
         if systemctl is-active --quiet unbound; then
@@ -1143,182 +1218,185 @@ EOF
     done
 
     if systemctl is-active --quiet unbound; then
-        info "Unbound is running."
+        info "Unbound 正在运行。"
     else
-        error "Unbound failed to start. Checking logs..."
+        error "Unbound 启动失败。正在检查日志..."
         journalctl -u unbound --no-pager -n 30
-        fatal "Unbound failed to start. Check logs above."
+        fatal "Unbound 启动失败。请检查上面的日志输出。"
     fi
 }
 
 ###############################################################################
-# Post-Installation Validation
+# 安装后验证
 ###############################################################################
 post_install_validation() {
-    info "Running post-installation validation..."
+    info "正在运行安装后验证..."
 
     echo ""
     echo "============================================================"
-    echo "  Post-Installation Validation"
+    echo "  安装后验证"
     echo "============================================================"
     echo ""
 
     local pass=0
     local fail=0
 
-    # Test 1: Service status
+    # 测试 1: 服务状态
     if systemctl is-active --quiet unbound; then
-        printf '%b[PASS]%b Unbound service is active\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b Unbound 服务运行中\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[FAIL]%b Unbound service is not active\n' "${RED}" "${NC}"
+        printf '%b[失败]%b Unbound 服务未运行\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
-    # Test 2: DNS resolution
+    # 测试 2: DNS 解析
     if dig @127.0.0.1 +short +time=5 +tries=2 example.com A >/dev/null 2>&1; then
-        printf '%b[PASS]%b DNS resolution working (example.com)\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b DNS 解析正常 (example.com)\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[FAIL]%b DNS resolution failed\n' "${RED}" "${NC}"
+        printf '%b[失败]%b DNS 解析失败\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
-    # Test 3: DNSSEC validation
+    # 测试 3: DNSSEC 验证
     local ad_flag
     ad_flag=$(dig @127.0.0.1 +time=5 +tries=2 example.com A 2>&1 | grep -c "ad;" || true)
     if [[ "$ad_flag" -ge 1 ]]; then
-        printf '%b[PASS]%b DNSSEC validation active (AD flag set)\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b DNSSEC 验证已启用 (AD 标志已设置)\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[WARN]%b DNSSEC AD flag not detected (may need time to prime cache)\n' "${YELLOW}" "${NC}"
+        printf '%b[警告]%b 未检测到 DNSSEC AD 标志（可能需要时间初始化缓存）\n' "${YELLOW}" "${NC}"
     fi
 
-    # Test 4: Port listening
+    # 测试 4: 端口监听状态
     for port in 53 853 443; do
         if ss -tlnp | grep -q ":${port} "; then
-            printf '%b[PASS]%b TCP port %s is listening\n' "${GREEN}" "${NC}" "${port}"
+            printf '%b[通过]%b TCP 端口 %s 正在监听\n' "${GREEN}" "${NC}" "${port}"
             pass=$((pass + 1))
         else
-            printf '%b[FAIL]%b TCP port %s is not listening\n' "${RED}" "${NC}" "${port}"
+            printf '%b[失败]%b TCP 端口 %s 未监听\n' "${RED}" "${NC}" "${port}"
             fail=$((fail + 1))
         fi
     done
 
     if ss -ulnp | grep -q ":53 "; then
-        printf '%b[PASS]%b UDP port 53 is listening\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b UDP 端口 53 正在监听\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[FAIL]%b UDP port 53 is not listening\n' "${RED}" "${NC}"
+        printf '%b[失败]%b UDP 端口 53 未监听\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
-    # Test 5: Configuration validation
+    # 测试 5: 配置文件验证
     if unbound-checkconf "$UNBOUND_MAIN_CONF" >/dev/null 2>&1; then
-        printf '%b[PASS]%b Configuration file is valid\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b 配置文件有效\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[FAIL]%b Configuration file has errors\n' "${RED}" "${NC}"
+        printf '%b[失败]%b 配置文件存在错误\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
-    # Test 6: unbound-control
+    # 测试 6: unbound-control
     if unbound-control status >/dev/null 2>&1; then
-        printf '%b[PASS]%b unbound-control is operational\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b unbound-control 运行正常\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[WARN]%b unbound-control not responding (may need service restart)\n' "${YELLOW}" "${NC}"
+        printf '%b[警告]%b unbound-control 无响应（可能需要重启服务）\n' "${YELLOW}" "${NC}"
     fi
 
-    # Test 7: Firewall active
+    # 测试 7: 防火墙状态
     if ufw status 2>/dev/null | grep -q "Status: active"; then
-        printf '%b[PASS]%b UFW firewall is active\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b UFW 防火墙已激活\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[FAIL]%b UFW firewall is not active\n' "${RED}" "${NC}"
+        printf '%b[失败]%b UFW 防火墙未激活\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
-    # Test 8: Hide identity
+    # 测试 8: 服务器身份是否隐藏
     local identity
     identity=$(dig @127.0.0.1 +time=5 +tries=2 CH TXT id.server 2>&1 || true)
     if echo "$identity" | grep -q "REFUSED\|connection timed out\|no servers"; then
-        printf '%b[PASS]%b Server identity is hidden\n' "${GREEN}" "${NC}"
+        printf '%b[通过]%b 服务器身份已隐藏\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf '%b[WARN]%b Server identity may be visible\n' "${YELLOW}" "${NC}"
+        printf '%b[警告]%b 服务器身份可能可见\n' "${YELLOW}" "${NC}"
     fi
 
     echo ""
     echo "============================================================"
-    printf '  Results: %b%d passed%b, %b%d failed%b\n' "${GREEN}" "$pass" "${NC}" "${RED}" "$fail" "${NC}"
+    printf '  结果: %b%d 项通过%b, %b%d 项失败%b\n' "${GREEN}" "$pass" "${NC}" "${RED}" "$fail" "${NC}"
     echo "============================================================"
     echo ""
 
     if [[ $fail -gt 0 ]]; then
-        warn "Some validation checks failed. Review the output above."
+        warn "部分验证检查未通过。请查看上面的输出。"
     else
-        info "All validation checks passed!"
+        info "所有验证检查均已通过！"
     fi
 }
 
 ###############################################################################
-# Print Summary
+# 打印安装摘要
 ###############################################################################
 print_summary() {
     cat <<EOF
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║               Enterprise Unbound DNS Server - Installation Complete        ║
+║               企业级 Unbound DNS 服务器 - 安装完成                          ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                            ║
-║  Service Status:                                                           ║
+║  服务状态:                                                                  ║
 ║    • Unbound DNS:  systemctl status unbound                                ║
-║    • Firewall:     ufw status verbose                                      ║
+║    • 防火墙:       ufw status verbose                                      ║
 ║    • Fail2Ban:     systemctl status fail2ban                               ║
 ║                                                                            ║
-║  Listening Ports:                                                          ║
+║  监听端口:                                                                  ║
 ║    • DNS (UDP/TCP):  ${DNS_PORT}                                                    ║
 ║    • DNS-over-TLS:   ${DOT_PORT}                                                   ║
 ║    • DNS-over-HTTPS: ${DOH_PORT}                                                   ║
-║    • Control:        8953 (localhost only)                                  ║
+║    • 远程控制:       8953 (仅限本地)                                         ║
 ║                                                                            ║
-║  Configuration Files:                                                      ║
-║    • Main:          ${UNBOUND_MAIN_CONF}                           ║
-║    • Server:        ${UNBOUND_CONF_DIR}/01-server.conf       ║
-║    • Remote Ctrl:   ${UNBOUND_CONF_DIR}/02-remote-control.conf║
+║  配置文件:                                                                  ║
+║    • 主配置:        ${UNBOUND_MAIN_CONF}                           ║
+║    • 服务器:        ${UNBOUND_CONF_DIR}/01-server.conf       ║
+║    • 远程控制:      ${UNBOUND_CONF_DIR}/02-remote-control.conf║
 ║    • DoH:           ${UNBOUND_CONF_DIR}/03-doh.conf          ║
-║    • Blocklist:     ${UNBOUND_CONF_DIR}/04-blocklist.conf    ║
+║    • 黑名单:        ${UNBOUND_CONF_DIR}/04-blocklist.conf    ║
 ║                                                                            ║
-║  TLS Certificates:                                                         ║
-║    • Certificate:   ${CERT_DIR}/fullchain.pem                        ║
-║    • Private Key:   ${CERT_DIR}/privkey.pem                          ║
+║  TLS 证书:                                                                  ║
+║    • 证书文件:      ${CERT_DIR}/fullchain.pem                        ║
+║    • 私钥文件:      ${CERT_DIR}/privkey.pem                          ║
 ║                                                                            ║
-║  Useful Commands:                                                          ║
-║    • Health check:    /usr/local/bin/unbound-health-check -v               ║
-║    • View statistics: /usr/local/bin/unbound-stats                         ║
-║    • View logs:       tail -f ${UNBOUND_LOG_DIR}/unbound.log           ║
-║    • Flush cache:     unbound-control flush_zone .                         ║
-║    • Reload config:   unbound-control reload                               ║
-║    • Check config:    unbound-checkconf                                    ║
+║  常用命令:                                                                  ║
+║    • 健康检查:      /usr/local/bin/unbound-health-check -v                 ║
+║    • 查看统计:      /usr/local/bin/unbound-stats                           ║
+║    • 查看日志:      tail -f ${UNBOUND_LOG_DIR}/unbound.log             ║
+║    • 清除缓存:      unbound-control flush_zone .                           ║
+║    • 重载配置:      unbound-control reload                                 ║
+║    • 检查配置:      unbound-checkconf                                      ║
 ║                                                                            ║
-║  Security Features:                                                        ║
-║    ✓ DNSSEC validation enabled                                             ║
-║    ✓ DNS-over-TLS (DoT) on port 853                                       ║
-║    ✓ DNS-over-HTTPS (DoH) on port 443                                     ║
-║    ✓ Rate limiting (per-IP and global)                                     ║
-║    ✓ UFW firewall                                                          ║
-║    ✓ Fail2Ban DNS abuse protection                                         ║
-║    ✓ Systemd sandboxing (ProtectSystem, NoNewPrivileges, etc.)             ║
-║    ✓ QNAME minimisation (RFC 7816)                                         ║
-║    ✓ 0x20 query randomisation                                              ║
-║    ✓ Minimal responses (anti-amplification)                                ║
-║    ✓ deny-any enabled                                                      ║
-║    ✓ DNS performance kernel tuning                                         ║
-║    ✓ 90-day log retention                                                  ║
+║  安全特性:                                                                  ║
+║    ✓ DNSSEC 验证已启用                                                      ║
+║    ✓ DNS-over-TLS (DoT) 端口 853                                           ║
+║    ✓ DNS-over-HTTPS (DoH) 端口 443                                         ║
+║    ✓ 速率限制（每 IP 和全局）                                                ║
+║    ✓ UFW 防火墙（基于 nftables 后端）                                       ║
+║    ✓ Fail2Ban DNS 滥用防护                                                  ║
+║    ✓ Systemd 沙箱隔离（ProtectSystem, NoNewPrivileges 等）                  ║
+║    ✓ QNAME 最小化 (RFC 7816)                                               ║
+║    ✓ 0x20 查询随机化                                                        ║
+║    ✓ 最小化响应（防放大攻击）                                                ║
+║    ✓ deny-any 已启用                                                        ║
+║    ✓ DNS 性能内核调优                                                        ║
+║    ✓ CIS 基准内核安全加固                                                    ║
+║    ✓ SSH 安全加固                                                            ║
+║    ✓ 登录横幅和核心转储限制                                                  ║
+║    ✓ 90 天日志保留                                                           ║
 ║                                                                            ║
-║  Backup Location: ${BACKUP_DIR}                         ║
-║  Install Log:     ${LOG_FILE}                                    ║
+║  备份位置: ${BACKUP_DIR}                         ║
+║  安装日志: ${LOG_FILE}                                    ║
 ║                                                                            ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -1326,33 +1404,159 @@ EOF
 }
 
 ###############################################################################
-# Main
+# CIS 基准 - SSH 安全加固
+###############################################################################
+harden_ssh() {
+    info "正在应用 SSH 安全加固（CIS 基准）..."
+
+    local sshd_config_dir="/etc/ssh/sshd_config.d"
+
+    # 使用独立配置文件以避免修改主配置
+    mkdir -p "$sshd_config_dir"
+
+    cat > "${sshd_config_dir}/99-cis-hardening.conf" <<'EOF'
+# =============================================================================
+# SSH 安全加固 - CIS 基准合规配置
+# =============================================================================
+
+# 使用 SSH 协议版本 2（CIS 5.2.4）
+Protocol 2
+
+# 最大认证尝试次数（CIS 5.2.6）
+MaxAuthTries 4
+
+# 登录超时时间（CIS 5.2.16）
+LoginGraceTime 60
+
+# 空闲超时设置（CIS 5.2.13）
+ClientAliveInterval 300
+ClientAliveCountMax 3
+
+# 禁用空密码（CIS 5.2.9）
+PermitEmptyPasswords no
+
+# 禁用主机认证（CIS 5.2.7）
+HostbasedAuthentication no
+
+# 忽略用户已知主机文件中的 rhosts（CIS 5.2.8）
+IgnoreRhosts yes
+
+# 日志级别（CIS 5.2.3）
+LogLevel VERBOSE
+
+# 最大并发未认证连接数（CIS 5.2.19）
+MaxStartups 10:30:60
+
+# 最大会话数
+MaxSessions 10
+
+# 禁用 X11 转发（CIS 5.2.5）
+X11Forwarding no
+
+# 禁用 TCP 转发
+AllowTcpForwarding no
+
+# 使用强加密算法
+Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256
+EOF
+
+    # 验证 SSH 配置有效性
+    if sshd -t 2>/dev/null; then
+        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+        info "SSH 安全加固已应用。"
+    else
+        warn "SSH 配置验证失败，已回滚更改。"
+        rm -f "${sshd_config_dir}/99-cis-hardening.conf"
+    fi
+}
+
+###############################################################################
+# CIS 基准 - 登录横幅配置
+###############################################################################
+configure_login_banners() {
+    info "正在配置登录横幅（CIS 基准）..."
+
+    # 设置登录前横幅（CIS 1.7.1）
+    cat > /etc/issue <<'EOF'
+*******************************************************************************
+*                           授权访问警告                                       *
+*  未经授权的访问是被禁止的。所有活动都将被监控和记录。                            *
+*  继续使用即表示您同意接受安全监控和审计。                                       *
+*******************************************************************************
+EOF
+
+    cat > /etc/issue.net <<'EOF'
+*******************************************************************************
+*                           授权访问警告                                       *
+*  未经授权的访问是被禁止的。所有活动都将被监控和记录。                            *
+*  继续使用即表示您同意接受安全监控和审计。                                       *
+*******************************************************************************
+EOF
+
+    # 设置登录后横幅 (MOTD)
+    cat > /etc/motd <<'EOF'
+=== 企业级 Unbound DNS 服务器 ===
+所有操作均受安全监控。仅限授权管理员使用。
+EOF
+
+    # 设置文件权限（CIS 1.7.4 - 1.7.6）
+    chown root:root /etc/issue /etc/issue.net /etc/motd
+    chmod 644 /etc/issue /etc/issue.net /etc/motd
+
+    info "登录横幅配置完成。"
+}
+
+###############################################################################
+# 主函数
 ###############################################################################
 main() {
     parse_args "$@"
 
-    # Initialize log
+    # 初始化日志文件
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
     chmod 640 "$LOG_FILE"
 
     echo ""
     info "╔══════════════════════════════════════════════════════════════╗"
-    info "║   Enterprise Unbound DNS Server Installer v${SCRIPT_VERSION}            ║"
-    info "║   Target: Debian 13 / Azure Standard_B2ats_v2              ║"
+    info "║   企业级 Unbound DNS 服务器安装程序 v${SCRIPT_VERSION}            ║"
+    info "║   目标: Debian 13 / Azure Standard_B2ats_v2                 ║"
     info "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    info "Domain: $DOMAIN"
-    info "Email:  ${EMAIL:-N/A}"
-    info "Skip Certbot: $SKIP_CERTBOT"
+    info "域名: $DOMAIN"
+    info "邮箱: ${EMAIL:-N/A}"
+    info "跳过 Certbot: $SKIP_CERTBOT"
     echo ""
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        info "DRY RUN mode - no changes will be made."
+        info "试运行模式 - 不会做任何更改。"
+        info "将要执行以下步骤:"
+        info "  1.  安装前环境检查（root 权限、系统版本、内存、网络）"
+        info "  2.  备份现有配置文件"
+        info "  3.  安装必需的软件包（unbound, certbot, fail2ban 等）"
+        info "  4.  应用 DNS 性能调优和 CIS 内核安全加固"
+        info "  5.  创建 Unbound 用户和目录结构"
+        info "  6.  配置 DNSSEC 信任锚和根提示文件"
+        info "  7.  设置 TLS 证书（Let's Encrypt 或自签名）"
+        info "  8.  生成 Unbound 主配置文件"
+        info "  9.  配置 DNS-over-HTTPS (DoH)"
+        info "  10. 配置域名黑名单/RPZ"
+        info "  11. 配置 UFW 防火墙规则"
+        info "  12. 配置 Fail2Ban DNS 滥用防护"
+        info "  13. 配置日志轮转（90 天保留）"
+        info "  14. 应用 Systemd 服务安全加固"
+        info "  15. 创建监控和健康检查脚本"
+        info "  16. SSH 安全加固（CIS 基准）"
+        info "  17. 配置登录横幅"
+        info "  18. 验证配置文件语法"
+        info "  19. 启动 Unbound 服务"
+        info "  20. 运行安装后验证测试"
         exit 0
     fi
 
-    # Execute installation steps
+    # 执行安装步骤
     preflight_checks
     backup_existing
     install_packages
@@ -1368,15 +1572,17 @@ main() {
     configure_logrotate
     harden_systemd_service
     create_monitoring_scripts
+    harden_ssh
+    configure_login_banners
     validate_config
     start_unbound
     post_install_validation
     print_summary
 
-    info "Installation completed successfully!"
-    info "Please review the summary above and test your DNS server."
-    info "Run '/usr/local/bin/unbound-health-check -v' for a comprehensive health check."
+    info "安装完成！"
+    info "请查看上面的摘要并测试您的 DNS 服务器。"
+    info "运行 '/usr/local/bin/unbound-health-check -v' 进行全面健康检查。"
 }
 
-# Run main with all arguments
+# 使用所有参数运行主函数
 main "$@"
