@@ -21,13 +21,13 @@
 # 针对 2 线程、保守缓存大小和积极预取进行优化。
 ###############################################################################
 
-set -euo pipefail
+set -Eeuo pipefail
 IFS=$'\n\t'
 
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -101,6 +101,29 @@ fatal() { error "$@"; exit 1; }
 debug() { log "DEBUG" "$@"; }
 
 ###############################################################################
+# 错误处理和清理
+# 当脚本因错误终止时，确保系统 DNS 可用并记录失败信息。
+###############################################################################
+cleanup_on_error() {
+    local exit_code=$?
+    local line_no="${1:-unknown}"
+    error "安装在第 ${line_no} 行失败 (退出码: ${exit_code})。"
+    error "备份文件位于: ${BACKUP_DIR:-/var/backups}"
+    error "安装日志: ${LOG_FILE}"
+
+    # 确保系统有可用的 DNS（如果 resolv.conf 被删除但 Unbound 未启动）
+    if [[ ! -f /etc/resolv.conf ]] || ! grep -q "nameserver" /etc/resolv.conf 2>/dev/null; then
+        cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+DNSEOF
+        warn "已恢复 resolv.conf 使用公共 DNS 以确保网络连通性。"
+    fi
+
+    error "请检查日志文件并手动排查问题。"
+}
+
+###############################################################################
 # 使用说明
 ###############################################################################
 usage() {
@@ -129,10 +152,20 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --domain=*)
+                DOMAIN="${1#*=}"
+                [[ -z "$DOMAIN" ]] && fatal "--domain 参数需要一个值"
+                shift
+                ;;
             --domain)
                 DOMAIN="${2:-}"
                 [[ -z "$DOMAIN" ]] && fatal "--domain 参数需要一个值"
                 shift 2
+                ;;
+            --email=*)
+                EMAIL="${1#*=}"
+                [[ -z "$EMAIL" ]] && fatal "--email 参数需要一个值"
+                shift
                 ;;
             --email)
                 EMAIL="${2:-}"
@@ -165,6 +198,19 @@ parse_args() {
     fi
     if [[ -z "$EMAIL" && "$SKIP_CERTBOT" == "false" ]]; then
         fatal "缺少必需参数 --email（Let's Encrypt 需要）。使用 --skip-certbot 可跳过。"
+    fi
+
+    # 验证域名格式（RFC 1035: 每个标签以字母数字开头和结尾，中间允许连字符）
+    if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$ ]]; then
+        fatal "无效的域名格式: $DOMAIN"
+    fi
+    if [[ ${#DOMAIN} -gt 253 ]]; then
+        fatal "域名长度超过 253 字符限制: $DOMAIN"
+    fi
+
+    # 验证邮箱格式（如果提供）
+    if [[ -n "$EMAIL" && ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
+        fatal "无效的邮箱格式: $EMAIL"
     fi
 }
 
@@ -253,30 +299,35 @@ install_packages() {
     apt-get upgrade -y -qq
 
     info "正在安装必需的软件包..."
-    apt-get install -y -qq \
-        unbound \
-        unbound-anchor \
-        unbound-host \
-        dns-root-data \
-        dnsutils \
-        ufw \
-        certbot \
-        openssl \
-        curl \
-        wget \
-        ca-certificates \
-        gnupg \
-        lsb-release \
-        jq \
-        apparmor \
-        apparmor-utils \
-        fail2ban \
-        logrotate \
-        rsyslog \
-        apt-transport-https \
-        software-properties-common \
-        net-tools \
+    local packages=(
+        unbound
+        unbound-anchor
+        unbound-host
+        dns-root-data
+        dnsutils
+        ufw
+        openssl
+        curl
+        wget
+        ca-certificates
+        gnupg
+        lsb-release
+        jq
+        fail2ban
+        logrotate
+        rsyslog
+        apt-transport-https
+        software-properties-common
+        net-tools
         sudo
+    )
+
+    # 仅在需要 Let's Encrypt 时安装 certbot（最小化安装原则）
+    if [[ "$SKIP_CERTBOT" == "false" ]]; then
+        packages+=(certbot)
+    fi
+
+    apt-get install -y -qq "${packages[@]}"
 
     info "所有软件包安装完成。"
 }
@@ -604,7 +655,10 @@ server:
     tls-ciphers: "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
     # TLS 1.3 加密套件
     tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-    # 最低 TLS 1.2（PCI-DSS 3.2.1 要求 TLS 1.2+）
+    # 注意: 以上密码套件配置隐式要求 TLS 1.2+（PCI-DSS 3.2.1 合规）。
+    # Unbound 使用 OpenSSL 默认最低版本（TLS 1.2），且以上密码套件
+    # 不包含任何 TLS 1.0/1.1 算法，确保了 TLS 1.2+ 强制执行。
+    # 不使用上游 TLS 转发（本服务器直接递归查询根服务器）
     tls-upstream: no
     incoming-num-tcp: 1024
 
@@ -763,6 +817,10 @@ configure_doh() {
 # DNS-over-HTTPS (DoH) 配置
 # =============================================================================
 server:
+    # DoH 接口绑定（必须显式声明才能监听 HTTPS 端口）
+    interface: 0.0.0.0@${DOH_PORT}
+    interface: ::0@${DOH_PORT}
+
     # HTTPS 监听端口 (DoH)
     https-port: ${DOH_PORT}
     http-endpoint: "/dns-query"
@@ -799,26 +857,26 @@ server:
     # 引入本地黑名单
     include: "/etc/unbound/blocklist.conf"
 
-    # 拦截私有地址的反向查询
-    local-zone: "10.in-addr.arpa." nodefault
-    local-zone: "16.172.in-addr.arpa." nodefault
-    local-zone: "17.172.in-addr.arpa." nodefault
-    local-zone: "18.172.in-addr.arpa." nodefault
-    local-zone: "19.172.in-addr.arpa." nodefault
-    local-zone: "20.172.in-addr.arpa." nodefault
-    local-zone: "21.172.in-addr.arpa." nodefault
-    local-zone: "22.172.in-addr.arpa." nodefault
-    local-zone: "23.172.in-addr.arpa." nodefault
-    local-zone: "24.172.in-addr.arpa." nodefault
-    local-zone: "25.172.in-addr.arpa." nodefault
-    local-zone: "26.172.in-addr.arpa." nodefault
-    local-zone: "27.172.in-addr.arpa." nodefault
-    local-zone: "28.172.in-addr.arpa." nodefault
-    local-zone: "29.172.in-addr.arpa." nodefault
-    local-zone: "30.172.in-addr.arpa." nodefault
-    local-zone: "31.172.in-addr.arpa." nodefault
-    local-zone: "168.192.in-addr.arpa." nodefault
-    local-zone: "254.169.in-addr.arpa." nodefault
+    # 拒绝私有地址的反向查询（防止向根服务器泄露内部网络信息）
+    local-zone: "10.in-addr.arpa." refuse
+    local-zone: "16.172.in-addr.arpa." refuse
+    local-zone: "17.172.in-addr.arpa." refuse
+    local-zone: "18.172.in-addr.arpa." refuse
+    local-zone: "19.172.in-addr.arpa." refuse
+    local-zone: "20.172.in-addr.arpa." refuse
+    local-zone: "21.172.in-addr.arpa." refuse
+    local-zone: "22.172.in-addr.arpa." refuse
+    local-zone: "23.172.in-addr.arpa." refuse
+    local-zone: "24.172.in-addr.arpa." refuse
+    local-zone: "25.172.in-addr.arpa." refuse
+    local-zone: "26.172.in-addr.arpa." refuse
+    local-zone: "27.172.in-addr.arpa." refuse
+    local-zone: "28.172.in-addr.arpa." refuse
+    local-zone: "29.172.in-addr.arpa." refuse
+    local-zone: "30.172.in-addr.arpa." refuse
+    local-zone: "31.172.in-addr.arpa." refuse
+    local-zone: "168.192.in-addr.arpa." refuse
+    local-zone: "254.169.in-addr.arpa." refuse
 EOF
 
     info "RPZ 黑名单配置完成。"
@@ -1190,21 +1248,15 @@ validate_config() {
 start_unbound() {
     info "正在启动 Unbound DNS 服务器..."
 
+    systemctl enable unbound
+
     # 如果 systemd-resolved 正在运行则停止它（与端口 53 冲突）
     if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
         systemctl disable --now systemd-resolved
-        # 更新 resolv.conf 使用本地 DNS
-        rm -f /etc/resolv.conf
-        cat > /etc/resolv.conf <<'EOF'
-# 由 Unbound DNS 安装脚本管理
-nameserver 127.0.0.1
-nameserver ::1
-options edns0 trust-ad
-EOF
-        info "已禁用 systemd-resolved 并更新 resolv.conf"
+        info "已禁用 systemd-resolved（端口 53 冲突）"
     fi
 
-    systemctl enable unbound
+    # 立即启动 Unbound 以最小化 DNS 不可用窗口
     systemctl restart unbound
 
     # 等待服务就绪
@@ -1219,6 +1271,15 @@ EOF
 
     if systemctl is-active --quiet unbound; then
         info "Unbound 正在运行。"
+        # Unbound 启动成功后才更新 resolv.conf
+        rm -f /etc/resolv.conf
+        cat > /etc/resolv.conf <<'EOF'
+# 由 Unbound DNS 安装脚本管理
+nameserver 127.0.0.1
+nameserver ::1
+options edns0 trust-ad
+EOF
+        info "已更新 resolv.conf 指向本地 DNS"
     else
         error "Unbound 启动失败。正在检查日志..."
         journalctl -u unbound --no-pager -n 30
@@ -1419,8 +1480,8 @@ harden_ssh() {
 # SSH 安全加固 - CIS 基准合规配置
 # =============================================================================
 
-# 使用 SSH 协议版本 2（CIS 5.2.4）
-Protocol 2
+# 注意: Protocol 2 在现代 OpenSSH (7.6+) 中已移除 SSH v1 支持，
+# 该指令已废弃，无需显式声明。
 
 # 最大认证尝试次数（CIS 5.2.6）
 MaxAuthTries 4
@@ -1513,6 +1574,9 @@ EOF
 ###############################################################################
 main() {
     parse_args "$@"
+
+    # 注册错误处理陷阱（在参数解析之后，确保 BACKUP_DIR 等变量可用）
+    trap 'cleanup_on_error $LINENO' ERR
 
     # 初始化日志文件
     mkdir -p "$(dirname "$LOG_FILE")"
