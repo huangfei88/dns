@@ -10,7 +10,7 @@
 #   - CIS Benchmark and PCI-DSS compliance hardening
 #   - Rate limiting, access control, and anti-amplification
 #   - Systemd service sandboxing
-#   - nftables firewall with connection tracking
+#   - UFW firewall
 #   - Comprehensive logging and monitoring
 #   - Automatic TLS certificate provisioning (Let's Encrypt)
 #
@@ -40,7 +40,6 @@ readonly UNBOUND_MAIN_CONF="/etc/unbound/unbound.conf"
 readonly UNBOUND_LOG_DIR="/var/log/unbound"
 # TLS / ACME
 readonly CERT_DIR="/etc/unbound/tls"
-readonly ACME_WEBROOT="/var/www/acme"
 
 # Network defaults
 readonly DNS_PORT=53
@@ -223,9 +222,9 @@ backup_existing() {
         info "Backed up existing /etc/unbound"
     fi
 
-    if [[ -f /etc/nftables.conf ]]; then
-        cp -a /etc/nftables.conf "$BACKUP_DIR/" 2>/dev/null || true
-        info "Backed up existing /etc/nftables.conf"
+    if [[ -d /etc/ufw ]]; then
+        cp -a /etc/ufw "$BACKUP_DIR/etc_ufw" 2>/dev/null || true
+        info "Backed up existing /etc/ufw"
     fi
 
     # Backup sysctl
@@ -251,7 +250,7 @@ install_packages() {
         unbound-host \
         dns-root-data \
         dnsutils \
-        nftables \
+        ufw \
         certbot \
         openssl \
         curl \
@@ -268,32 +267,27 @@ install_packages() {
         apt-transport-https \
         software-properties-common \
         net-tools \
-        tcpdump \
-        libhiredis-dev \
-        libevent-dev \
-        libexpat1-dev \
-        libprotobuf-c-dev \
-        protobuf-c-compiler \
         sudo
 
     info "All packages installed successfully."
 }
 
 ###############################################################################
-# System Hardening (CIS / PCI-DSS)
+# System Tuning for DNS Server Performance
 ###############################################################################
-harden_system() {
-    info "Applying system hardening (CIS/PCI-DSS)..."
+tune_system_for_dns() {
+    info "Applying DNS server performance tuning..."
 
-    # --- Kernel parameters for DNS server ---
+    # --- Kernel parameters for DNS server performance ---
     cat > /etc/sysctl.d/99-unbound-dns.conf <<'SYSCTL'
 # =============================================================================
 # Kernel Tuning for Enterprise DNS Server
-# CIS Benchmark & PCI-DSS Compliance
+# DNS-specific network performance parameters only
+# (System-level CIS/PCI-DSS hardening is managed separately)
 # =============================================================================
 
-# --- Network Performance ---
-# Increase socket buffer sizes for DNS traffic
+# --- Network Performance (DNS traffic optimization) ---
+# Increase socket buffer sizes for high-throughput DNS traffic
 net.core.rmem_max = 8388608
 net.core.wmem_max = 8388608
 net.core.rmem_default = 1048576
@@ -302,7 +296,7 @@ net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 65535
 net.core.optmem_max = 2097152
 
-# TCP tuning
+# TCP tuning (for DoT/DoH connections)
 net.ipv4.tcp_rmem = 4096 1048576 8388608
 net.ipv4.tcp_wmem = 4096 1048576 8388608
 net.ipv4.tcp_max_syn_backlog = 65536
@@ -311,141 +305,26 @@ net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_max_orphans = 65536
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_no_metrics_save = 1
 
-# UDP tuning
+# UDP tuning (for DNS query traffic)
 net.ipv4.udp_rmem_min = 8192
 net.ipv4.udp_wmem_min = 8192
-
-# --- Security Hardening (CIS / PCI-DSS) ---
-# Disable IP forwarding (CIS 3.1.1)
-net.ipv4.ip_forward = 0
-net.ipv6.conf.all.forwarding = 0
-
-# Disable source routing (CIS 3.1.2)
-net.ipv4.conf.all.accept_source_route = 0
-net.ipv4.conf.default.accept_source_route = 0
-net.ipv6.conf.all.accept_source_route = 0
-net.ipv6.conf.default.accept_source_route = 0
-
-# Disable ICMP redirects (CIS 3.2.2)
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.default.accept_redirects = 0
-net.ipv6.conf.all.accept_redirects = 0
-net.ipv6.conf.default.accept_redirects = 0
-net.ipv4.conf.all.send_redirects = 0
-net.ipv4.conf.default.send_redirects = 0
-
-# Log martian packets (CIS 3.2.4)
-net.ipv4.conf.all.log_martians = 1
-net.ipv4.conf.default.log_martians = 1
-
-# Ignore ICMP broadcast requests (CIS 3.2.5)
-net.ipv4.icmp_echo_ignore_broadcasts = 1
-
-# Ignore bogus ICMP responses (CIS 3.2.6)
-net.ipv4.icmp_ignore_bogus_error_responses = 1
-
-# Enable reverse path filtering (CIS 3.2.7)
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
-
-# Enable TCP SYN cookies (CIS 3.2.8)
-net.ipv4.tcp_syncookies = 1
-
-# Disable IPv6 router advertisements (CIS 3.3.1)
-net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.default.accept_ra = 0
 
 # --- Memory ---
 # Reduce swappiness for DNS cache performance
 vm.swappiness = 10
 
-# --- Conntrack for nftables ---
-net.netfilter.nf_conntrack_max = 262144
-
-# --- File descriptors ---
+# --- File descriptors (for high connection count) ---
 fs.file-max = 1048576
-
-# --- Address Space Layout Randomization (PCI-DSS) ---
-kernel.randomize_va_space = 2
-
-# Restrict core dumps (CIS 1.5.1)
-fs.suid_dumpable = 0
-
-# Restrict kernel pointer exposure (CIS)
-kernel.kptr_restrict = 2
-
-# Restrict dmesg access (CIS)
-kernel.dmesg_restrict = 1
 SYSCTL
 
     sysctl --system >/dev/null 2>&1 || warn "Some sysctl parameters may not have applied."
-    info "Kernel parameters applied."
-
-    # --- Restrict core dumps (CIS 1.5.1) ---
-    cat > /etc/security/limits.d/99-core-dump.conf <<'EOF'
-* hard core 0
-EOF
-
-    # --- File permissions hardening ---
-    chmod 600 /etc/crontab 2>/dev/null || true
-    chmod 700 /etc/cron.d 2>/dev/null || true
-    chmod 700 /etc/cron.daily 2>/dev/null || true
-    chmod 700 /etc/cron.hourly 2>/dev/null || true
-    chmod 700 /etc/cron.weekly 2>/dev/null || true
-    chmod 700 /etc/cron.monthly 2>/dev/null || true
-
-    # --- SSH hardening (PCI-DSS) ---
-    if [[ -f /etc/ssh/sshd_config ]]; then
-        local sshd_hardening="/etc/ssh/sshd_config.d/99-hardening.conf"
-        mkdir -p /etc/ssh/sshd_config.d
-        cat > "$sshd_hardening" <<'EOF'
-# CIS / PCI-DSS SSH Hardening
-Protocol 2
-MaxAuthTries 3
-PermitRootLogin no
-PermitEmptyPasswords no
-X11Forwarding no
-AllowTcpForwarding no
-AllowAgentForwarding no
-ClientAliveInterval 300
-ClientAliveCountMax 2
-LoginGraceTime 60
-MaxSessions 4
-Banner /etc/issue.net
-EOF
-        info "SSH hardening applied."
-    fi
-
-    # --- Login banner (PCI-DSS) ---
-    cat > /etc/issue.net <<'EOF'
-*******************************************************************************
-*  WARNING: This system is for authorized use only.                           *
-*  All activity is monitored and logged. Unauthorized access is prohibited    *
-*  and will be prosecuted to the fullest extent of the law.                   *
-*******************************************************************************
-EOF
-
-    # --- Disable unnecessary services ---
-    local -a disable_services=(
-        "avahi-daemon"
-        "cups"
-        "rpcbind"
-    )
-    for svc in "${disable_services[@]}"; do
-        if systemctl is-enabled "$svc" &>/dev/null; then
-            systemctl disable --now "$svc" 2>/dev/null || true
-            info "Disabled unnecessary service: $svc"
-        fi
-    done
-
-    info "System hardening complete."
+    info "DNS performance kernel parameters applied."
 }
 
 ###############################################################################
@@ -525,8 +404,13 @@ setup_tls() {
     else
         info "Provisioning Let's Encrypt certificate for $DOMAIN..."
 
-        # Set up ACME webroot
-        mkdir -p "$ACME_WEBROOT"
+        # If ufw is already active, temporarily allow port 80 for ACME challenge
+        local ufw_was_active="false"
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
+            ufw_was_active="true"
+            ufw allow 80/tcp >/dev/null 2>&1
+            info "Temporarily opened port 80 for ACME challenge."
+        fi
 
         # Request certificate using standalone mode
         certbot certonly --standalone \
@@ -537,23 +421,53 @@ setup_tls() {
             --preferred-challenges http \
             --key-type ecdsa \
             --elliptic-curve secp256r1 \
-            --deploy-hook "bash -c 'cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $CERT_DIR/fullchain.pem && cp /etc/letsencrypt/live/$DOMAIN/privkey.pem $CERT_DIR/privkey.pem && chown unbound:unbound $CERT_DIR/*.pem && chmod 640 $CERT_DIR/privkey.pem && chmod 644 $CERT_DIR/fullchain.pem && systemctl reload unbound'" \
             || fatal "Certbot failed. Use --skip-certbot for self-signed certificates."
 
-        # Copy certificates
+        # Close temporary port 80 if we opened it
+        if [[ "$ufw_was_active" == "true" ]]; then
+            ufw delete allow 80/tcp >/dev/null 2>&1
+            info "Closed temporary port 80."
+        fi
+
+        # Copy certificates to Unbound TLS directory
         cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
         cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$CERT_DIR/privkey.pem"
         chown unbound:unbound "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
         chmod 640 "$CERT_DIR/privkey.pem"
         chmod 644 "$CERT_DIR/fullchain.pem"
 
-        # Set up auto-renewal cron
-        cat > /etc/cron.d/certbot-unbound <<EOF
-# Renew certificates twice daily (PCI-DSS: ensure certificates are always valid)
-0 */12 * * * root certbot renew --quiet --deploy-hook "bash -c 'cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $CERT_DIR/fullchain.pem && cp /etc/letsencrypt/live/$DOMAIN/privkey.pem $CERT_DIR/privkey.pem && chown unbound:unbound $CERT_DIR/*.pem && chmod 640 $CERT_DIR/privkey.pem && chmod 644 $CERT_DIR/fullchain.pem && systemctl reload unbound'"
+        # Set up certbot renewal hooks (Debian certbot.timer handles renewal scheduling)
+        mkdir -p /etc/letsencrypt/renewal-hooks/pre
+        mkdir -p /etc/letsencrypt/renewal-hooks/post
+        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+
+        # Pre-hook: open port 80 for ACME challenge
+        cat > /etc/letsencrypt/renewal-hooks/pre/open-firewall.sh <<'PREHOOK'
+#!/usr/bin/env bash
+ufw allow 80/tcp >/dev/null 2>&1 || true
+PREHOOK
+        chmod 755 /etc/letsencrypt/renewal-hooks/pre/open-firewall.sh
+
+        # Post-hook: close port 80 after renewal
+        cat > /etc/letsencrypt/renewal-hooks/post/close-firewall.sh <<'POSTHOOK'
+#!/usr/bin/env bash
+ufw delete allow 80/tcp >/dev/null 2>&1 || true
+POSTHOOK
+        chmod 755 /etc/letsencrypt/renewal-hooks/post/close-firewall.sh
+
+        # Deploy-hook: copy certs and reload Unbound
+        cat > /etc/letsencrypt/renewal-hooks/deploy/update-unbound-certs.sh <<EOF
+#!/usr/bin/env bash
+cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $CERT_DIR/fullchain.pem
+cp /etc/letsencrypt/live/$DOMAIN/privkey.pem $CERT_DIR/privkey.pem
+chown unbound:unbound $CERT_DIR/*.pem
+chmod 640 $CERT_DIR/privkey.pem
+chmod 644 $CERT_DIR/fullchain.pem
+systemctl reload unbound 2>/dev/null || true
 EOF
-        chmod 644 /etc/cron.d/certbot-unbound
-        info "Let's Encrypt certificate provisioned with auto-renewal."
+        chmod 755 /etc/letsencrypt/renewal-hooks/deploy/update-unbound-certs.sh
+
+        info "Let's Encrypt certificate provisioned with auto-renewal hooks."
     fi
 }
 
@@ -610,7 +524,9 @@ server:
     tls-service-pem: "${CERT_DIR}/fullchain.pem"
     tls-port: ${DOT_PORT}
     # Use strong TLS ciphers only (PCI-DSS requirement)
-    tls-ciphers: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+    # TLS 1.2 cipher suites (OpenSSL format)
+    tls-ciphers: "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+    # TLS 1.3 cipher suites
     tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
     # Minimum TLS 1.2 (PCI-DSS 3.2.1 requires TLS 1.2+)
     tls-upstream: no
@@ -692,9 +608,6 @@ server:
     qname-minimisation: yes
     qname-minimisation-strict: no
 
-    # Prevent DNS rebinding attacks
-    private-domain: ""
-
     # Deny queries of type ANY (anti-amplification)
     deny-any: yes
 
@@ -725,7 +638,6 @@ server:
     log-local-actions: yes
     log-servfail: yes
     log-time-ascii: yes
-    val-log-level: 1
 
     # --- Process Settings ---
     username: "unbound"
@@ -838,137 +750,39 @@ EOF
 }
 
 ###############################################################################
-# nftables Firewall Configuration
+# UFW Firewall Configuration
 ###############################################################################
 configure_firewall() {
-    info "Configuring nftables firewall..."
+    info "Configuring ufw firewall..."
 
-    cat > /etc/nftables.conf <<'EOF'
-#!/usr/sbin/nft -f
-# =============================================================================
-# Enterprise DNS Server Firewall (nftables)
-# CIS / PCI-DSS Compliant
-# =============================================================================
+    # Reset ufw to clean state (non-interactive)
+    ufw --force reset >/dev/null 2>&1
 
-# Flush existing rules
-flush ruleset
+    # Default policies: deny incoming, allow outgoing
+    ufw default deny incoming >/dev/null 2>&1
+    ufw default allow outgoing >/dev/null 2>&1
 
-table inet filter {
-    # --- Rate limit sets ---
-    set dns_meter_v4 {
-        type ipv4_addr
-        flags dynamic,timeout
-        timeout 10s
-    }
-    set dns_meter_v6 {
-        type ipv6_addr
-        flags dynamic,timeout
-        timeout 10s
-    }
-    set blocked_v4 {
-        type ipv4_addr
-        flags dynamic,timeout
-        timeout 300s
-    }
-    set blocked_v6 {
-        type ipv6_addr
-        flags dynamic,timeout
-        timeout 300s
-    }
+    # SSH with rate limiting (limits to 6 connections per 30 seconds per IP)
+    ufw limit ssh/tcp >/dev/null 2>&1
 
-    chain input {
-        type filter hook input priority 0; policy drop;
+    # DNS (UDP and TCP port 53)
+    ufw allow 53/tcp >/dev/null 2>&1
+    ufw allow 53/udp >/dev/null 2>&1
 
-        # --- Established/Related connections ---
-        ct state established,related accept
+    # DNS-over-TLS (port 853)
+    ufw allow 853/tcp >/dev/null 2>&1
 
-        # --- Drop invalid packets ---
-        ct state invalid drop
+    # DNS-over-HTTPS (port 443)
+    ufw allow 443/tcp >/dev/null 2>&1
 
-        # --- Loopback ---
-        iifname "lo" accept
+    # Enable logging (medium level for audit purposes)
+    ufw logging medium >/dev/null 2>&1
 
-        # --- ICMP (rate limited) ---
-        ip protocol icmp icmp type { echo-request } \
-            limit rate 10/second burst 20 packets accept
-        ip6 nexthdr icmpv6 icmpv6 type { echo-request } \
-            limit rate 10/second burst 20 packets accept
+    # Enable ufw (non-interactive)
+    ufw --force enable >/dev/null 2>&1
 
-        # Essential ICMPv6 for IPv6 operation
-        ip6 nexthdr icmpv6 icmpv6 type {
-            nd-neighbor-solicit,
-            nd-neighbor-advert,
-            nd-router-advert,
-            nd-router-solicit
-        } accept
-
-        # --- SSH (rate limited, PCI-DSS: restrict management access) ---
-        tcp dport 22 ct state new \
-            limit rate 5/minute burst 10 packets accept
-
-        # --- DNS (UDP/TCP port 53) ---
-        # Drop blocked IPs
-        ip saddr @blocked_v4 drop
-        ip6 saddr @blocked_v6 drop
-
-        # Rate limit DNS queries per source IP (anti-DDoS)
-        udp dport 53 add @dns_meter_v4 { ip saddr limit rate over 100/second } \
-            add @blocked_v4 { ip saddr } drop
-        udp dport 53 accept
-
-        tcp dport 53 ct state new accept
-
-        # --- DNS-over-TLS (port 853) ---
-        tcp dport 853 ct state new \
-            limit rate 50/second burst 100 packets accept
-
-        # --- DNS-over-HTTPS (port 443) ---
-        tcp dport 443 ct state new \
-            limit rate 50/second burst 100 packets accept
-
-        # --- Unbound control (localhost only) ---
-        tcp dport 8953 ip saddr 127.0.0.1 accept
-        tcp dport 8953 ip6 saddr ::1 accept
-
-        # --- Logging dropped packets (PCI-DSS audit requirement) ---
-        limit rate 5/minute burst 10 packets \
-            log prefix "[nftables-DROP] " level info
-        drop
-    }
-
-    chain forward {
-        type filter hook forward priority 0; policy drop;
-        # DNS server should not forward packets
-    }
-
-    chain output {
-        type filter hook output priority 0; policy accept;
-
-        # Allow outgoing DNS (to upstream root servers)
-        udp dport 53 accept
-        tcp dport 53 accept
-
-        # Allow outgoing TLS (for DNS-over-TLS upstream if needed)
-        tcp dport 853 accept
-
-        # Allow outgoing HTTPS (for OCSP, CRL, certbot)
-        tcp dport 443 accept
-        tcp dport 80 accept
-
-        # Allow outgoing NTP
-        udp dport 123 accept
-
-        # Allow established connections
-        ct state established,related accept
-    }
-}
-EOF
-
-    # Enable and start nftables
-    systemctl enable nftables
-    nft -f /etc/nftables.conf || warn "Failed to apply nftables rules"
-
-    info "Firewall configured and active."
+    info "UFW firewall configured and active."
+    info "Allowed ports: SSH(22/tcp-limited), DNS(53/tcp+udp), DoT(853/tcp), DoH(443/tcp)"
 }
 
 ###############################################################################
@@ -988,19 +802,23 @@ port     = 53,853,443
 protocol = udp,tcp
 filter   = unbound-dns-abuse
 logpath  = /var/log/unbound/unbound.log
-maxretry = 100
+maxretry = 50
 findtime = 60
 bantime  = 3600
-action   = nftables-allports[name=dns-abuse, protocol=all]
+banaction = ufw
 EOF
 
-    # Create filter
+    # Create filter to match Unbound rate-limit and error log entries
+    # Unbound logs rate-limit events as: "[timestamp] unbound[pid:tid] info: ratelimit for <IP> ..."
     cat > /etc/fail2ban/filter.d/unbound-dns-abuse.conf <<'EOF'
 # =============================================================================
 # Fail2Ban Filter for Unbound DNS Abuse
+# Matches rate-limit violations logged by Unbound (verbosity >= 0)
+# Log format: [timestamp] unbound[pid:tid] info: ratelimit for <IP> ...
 # =============================================================================
 [Definition]
-failregex = .*query from <HOST>#\d+ .*
+failregex = ^.+\bunbound\[\d+:\d+\] info: ratelimit for <HOST>\b.*$
+            ^.+\bunbound\[\d+:\d+\] info: ip_ratelimit for <HOST>\b.*$
 ignoreregex =
 EOF
 
@@ -1124,7 +942,9 @@ create_monitoring_scripts() {
 # Unbound Health Check Script
 # Returns 0 on success, 1 on failure
 ###############################################################################
-set -euo pipefail
+# NOTE: Do not use "set -e" here — we intentionally run commands that may
+# fail and capture their exit status for reporting.
+set -uo pipefail
 
 CHECKS_PASSED=0
 CHECKS_FAILED=0
@@ -1143,7 +963,7 @@ check() {
 }
 
 # Check 1: Service is running
-systemctl is-active --quiet unbound
+systemctl is-active --quiet unbound 2>/dev/null
 check "Unbound service active" "$?"
 
 # Check 2: Port 53 is listening
@@ -1157,15 +977,19 @@ check "Port 53 (TCP) listening" "$?"
 ss -tlnp | grep -q ':853 ' 2>/dev/null
 check "Port 853 (DoT) listening" "$?"
 
-# Check 4: DNS resolution works
+# Check 4: Port 443 is listening (DoH)
+ss -tlnp | grep -q ':443 ' 2>/dev/null
+check "Port 443 (DoH) listening" "$?"
+
+# Check 5: DNS resolution works
 dig @127.0.0.1 +short +time=5 +tries=2 example.com A >/dev/null 2>&1
 check "DNS resolution (A record)" "$?"
 
-# Check 5: DNSSEC validation works
+# Check 6: DNSSEC validation works
 dig @127.0.0.1 +dnssec +short +time=5 +tries=2 example.com A >/dev/null 2>&1
 check "DNSSEC resolution" "$?"
 
-# Check 6: DNSSEC validation rejects bad signatures
+# Check 7: DNSSEC validation rejects bad signatures
 dnssec_fail=$(dig @127.0.0.1 +time=5 +tries=2 dnssec-failed.org A 2>&1 | grep -c "SERVFAIL" || true)
 if [[ "$dnssec_fail" -ge 1 ]]; then
     check "DNSSEC rejects bad signatures" "0"
@@ -1173,7 +997,7 @@ else
     check "DNSSEC rejects bad signatures" "1"
 fi
 
-# Check 7: unbound-control works
+# Check 8: unbound-control works
 unbound-control status >/dev/null 2>&1
 check "unbound-control operational" "$?"
 
@@ -1344,19 +1168,19 @@ post_install_validation() {
 
     # Test 1: Service status
     if systemctl is-active --quiet unbound; then
-        printf "${GREEN}[PASS]${NC} Unbound service is active\n"
+        printf '%b[PASS]%b Unbound service is active\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${RED}[FAIL]${NC} Unbound service is not active\n"
+        printf '%b[FAIL]%b Unbound service is not active\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
     # Test 2: DNS resolution
     if dig @127.0.0.1 +short +time=5 +tries=2 example.com A >/dev/null 2>&1; then
-        printf "${GREEN}[PASS]${NC} DNS resolution working (example.com)\n"
+        printf '%b[PASS]%b DNS resolution working (example.com)\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${RED}[FAIL]${NC} DNS resolution failed\n"
+        printf '%b[FAIL]%b DNS resolution failed\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
@@ -1364,54 +1188,54 @@ post_install_validation() {
     local ad_flag
     ad_flag=$(dig @127.0.0.1 +time=5 +tries=2 example.com A 2>&1 | grep -c "ad;" || true)
     if [[ "$ad_flag" -ge 1 ]]; then
-        printf "${GREEN}[PASS]${NC} DNSSEC validation active (AD flag set)\n"
+        printf '%b[PASS]%b DNSSEC validation active (AD flag set)\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${YELLOW}[WARN]${NC} DNSSEC AD flag not detected (may need time to prime cache)\n"
+        printf '%b[WARN]%b DNSSEC AD flag not detected (may need time to prime cache)\n' "${YELLOW}" "${NC}"
     fi
 
     # Test 4: Port listening
-    for port in 53 853; do
+    for port in 53 853 443; do
         if ss -tlnp | grep -q ":${port} "; then
-            printf "${GREEN}[PASS]${NC} TCP port ${port} is listening\n"
+            printf '%b[PASS]%b TCP port %s is listening\n' "${GREEN}" "${NC}" "${port}"
             pass=$((pass + 1))
         else
-            printf "${RED}[FAIL]${NC} TCP port ${port} is not listening\n"
+            printf '%b[FAIL]%b TCP port %s is not listening\n' "${RED}" "${NC}" "${port}"
             fail=$((fail + 1))
         fi
     done
 
     if ss -ulnp | grep -q ":53 "; then
-        printf "${GREEN}[PASS]${NC} UDP port 53 is listening\n"
+        printf '%b[PASS]%b UDP port 53 is listening\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${RED}[FAIL]${NC} UDP port 53 is not listening\n"
+        printf '%b[FAIL]%b UDP port 53 is not listening\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
     # Test 5: Configuration validation
     if unbound-checkconf "$UNBOUND_MAIN_CONF" >/dev/null 2>&1; then
-        printf "${GREEN}[PASS]${NC} Configuration file is valid\n"
+        printf '%b[PASS]%b Configuration file is valid\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${RED}[FAIL]${NC} Configuration file has errors\n"
+        printf '%b[FAIL]%b Configuration file has errors\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
     # Test 6: unbound-control
     if unbound-control status >/dev/null 2>&1; then
-        printf "${GREEN}[PASS]${NC} unbound-control is operational\n"
+        printf '%b[PASS]%b unbound-control is operational\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${YELLOW}[WARN]${NC} unbound-control not responding (may need service restart)\n"
+        printf '%b[WARN]%b unbound-control not responding (may need service restart)\n' "${YELLOW}" "${NC}"
     fi
 
     # Test 7: Firewall active
-    if nft list ruleset 2>/dev/null | grep -q "chain input"; then
-        printf "${GREEN}[PASS]${NC} nftables firewall is active\n"
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+        printf '%b[PASS]%b UFW firewall is active\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${RED}[FAIL]${NC} nftables firewall is not configured\n"
+        printf '%b[FAIL]%b UFW firewall is not active\n' "${RED}" "${NC}"
         fail=$((fail + 1))
     fi
 
@@ -1419,15 +1243,15 @@ post_install_validation() {
     local identity
     identity=$(dig @127.0.0.1 +time=5 +tries=2 CH TXT id.server 2>&1 || true)
     if echo "$identity" | grep -q "REFUSED\|connection timed out\|no servers"; then
-        printf "${GREEN}[PASS]${NC} Server identity is hidden\n"
+        printf '%b[PASS]%b Server identity is hidden\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
-        printf "${YELLOW}[WARN]${NC} Server identity may be visible\n"
+        printf '%b[WARN]%b Server identity may be visible\n' "${YELLOW}" "${NC}"
     fi
 
     echo ""
     echo "============================================================"
-    printf "  Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}\n" "$pass" "$fail"
+    printf '  Results: %b%d passed%b, %b%d failed%b\n' "${GREEN}" "$pass" "${NC}" "${RED}" "$fail" "${NC}"
     echo "============================================================"
     echo ""
 
@@ -1450,7 +1274,7 @@ print_summary() {
 ║                                                                            ║
 ║  Service Status:                                                           ║
 ║    • Unbound DNS:  systemctl status unbound                                ║
-║    • Firewall:     nft list ruleset                                        ║
+║    • Firewall:     ufw status verbose                                      ║
 ║    • Fail2Ban:     systemctl status fail2ban                               ║
 ║                                                                            ║
 ║  Listening Ports:                                                          ║
@@ -1483,14 +1307,14 @@ print_summary() {
 ║    ✓ DNS-over-TLS (DoT) on port 853                                       ║
 ║    ✓ DNS-over-HTTPS (DoH) on port 443                                     ║
 ║    ✓ Rate limiting (per-IP and global)                                     ║
-║    ✓ nftables firewall with connection tracking                            ║
+║    ✓ UFW firewall                                                          ║
 ║    ✓ Fail2Ban DNS abuse protection                                         ║
 ║    ✓ Systemd sandboxing (ProtectSystem, NoNewPrivileges, etc.)             ║
 ║    ✓ QNAME minimisation (RFC 7816)                                         ║
 ║    ✓ 0x20 query randomisation                                              ║
 ║    ✓ Minimal responses (anti-amplification)                                ║
 ║    ✓ deny-any enabled                                                      ║
-║    ✓ CIS/PCI-DSS kernel hardening                                          ║
+║    ✓ DNS performance kernel tuning                                         ║
 ║    ✓ 90-day log retention                                                  ║
 ║                                                                            ║
 ║  Backup Location: ${BACKUP_DIR}                         ║
@@ -1532,7 +1356,7 @@ main() {
     preflight_checks
     backup_existing
     install_packages
-    harden_system
+    tune_system_for_dns
     setup_unbound_dirs
     setup_dnssec
     setup_tls
