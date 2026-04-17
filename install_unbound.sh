@@ -21,7 +21,7 @@
 # 针对 2 线程、保守缓存大小和积极预取进行优化。
 ###############################################################################
 
-set -euo pipefail
+set -Eeuo pipefail
 IFS=$'\n\t'
 
 ###############################################################################
@@ -200,8 +200,8 @@ parse_args() {
         fatal "缺少必需参数 --email（Let's Encrypt 需要）。使用 --skip-certbot 可跳过。"
     fi
 
-    # 验证域名格式（仅允许合法的 DNS 字符）
-    if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+    # 验证域名格式（RFC 1035: 每个标签以字母数字开头和结尾，中间允许连字符）
+    if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$ ]]; then
         fatal "无效的域名格式: $DOMAIN"
     fi
     if [[ ${#DOMAIN} -gt 253 ]]; then
@@ -209,7 +209,7 @@ parse_args() {
     fi
 
     # 验证邮箱格式（如果提供）
-    if [[ -n "$EMAIL" && ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    if [[ -n "$EMAIL" && ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
         fatal "无效的邮箱格式: $EMAIL"
     fi
 }
@@ -655,7 +655,9 @@ server:
     tls-ciphers: "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
     # TLS 1.3 加密套件
     tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-    # 注意: 以上密码套件配置隐式要求 TLS 1.2+（PCI-DSS 3.2.1 合规）
+    # 注意: 以上密码套件配置隐式要求 TLS 1.2+（PCI-DSS 3.2.1 合规）。
+    # Unbound 使用 OpenSSL 默认最低版本（TLS 1.2），且以上密码套件
+    # 不包含任何 TLS 1.0/1.1 算法，确保了 TLS 1.2+ 强制执行。
     # 不使用上游 TLS 转发（本服务器直接递归查询根服务器）
     tls-upstream: no
     incoming-num-tcp: 1024
