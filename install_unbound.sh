@@ -509,7 +509,7 @@ server:
     private-address: 172.16.0.0/12
     private-address: 192.168.0.0/16
     private-address: 169.254.0.0/16
-    private-address: fc00::/7
+    private-address: fd00::/8
     private-address: fe80::/10
 
     # --- Protocol Settings ---
@@ -802,21 +802,23 @@ port     = 53,853,443
 protocol = udp,tcp
 filter   = unbound-dns-abuse
 logpath  = /var/log/unbound/unbound.log
-maxretry = 5
+maxretry = 50
 findtime = 60
 bantime  = 3600
 banaction = ufw
 EOF
 
     # Create filter to match Unbound rate-limit and error log entries
+    # Unbound logs rate-limit events as: "[timestamp] unbound[pid:tid] info: ratelimit for <IP> ..."
     cat > /etc/fail2ban/filter.d/unbound-dns-abuse.conf <<'EOF'
 # =============================================================================
 # Fail2Ban Filter for Unbound DNS Abuse
-# Matches rate-limit violations logged by Unbound at verbosity >= 0
+# Matches rate-limit violations logged by Unbound (verbosity >= 0)
+# Log format: [timestamp] unbound[pid:tid] info: ratelimit for <IP> ...
 # =============================================================================
 [Definition]
-failregex = ^.*info: ratelimit for <HOST> .*$
-            ^.*info: ip_ratelimit for <HOST> .*$
+failregex = ^.+\bunbound\[\d+:\d+\] info: ratelimit for <HOST>\b.*$
+            ^.+\bunbound\[\d+:\d+\] info: ip_ratelimit for <HOST>\b.*$
 ignoreregex =
 EOF
 
