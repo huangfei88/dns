@@ -69,7 +69,7 @@ readonly RATELIMIT_SLABS=2
 readonly IP_RATELIMIT=100
 readonly IP_RATELIMIT_SLABS=2
 
-# Colours for output
+# Colors for output
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -107,7 +107,7 @@ Usage: sudo $SCRIPT_NAME [OPTIONS]
 
 Required:
   --domain <FQDN>      Domain name for TLS certificates (e.g., dns.example.com)
-  --email  <EMAIL>      Email for Let's Encrypt certificate notifications
+  --email  <EMAIL>     Email for Let's Encrypt certificate notifications
 
 Optional:
   --skip-certbot        Skip Let's Encrypt certificate provisioning (use self-signed)
@@ -1166,7 +1166,6 @@ dig @127.0.0.1 +dnssec +short +time=5 +tries=2 example.com A >/dev/null 2>&1
 check "DNSSEC resolution" "$?"
 
 # Check 6: DNSSEC validation rejects bad signatures
-local dnssec_fail
 dnssec_fail=$(dig @127.0.0.1 +time=5 +tries=2 dnssec-failed.org A 2>&1 | grep -c "SERVFAIL" || true)
 if [[ "$dnssec_fail" -ge 1 ]]; then
     check "DNSSEC rejects bad signatures" "0"
