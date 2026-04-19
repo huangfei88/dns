@@ -361,8 +361,8 @@ If you want clients to use your server by domain name, create DNS records:
 
 | Type | Name | Value | Purpose |
 |------|------|-------|---------|
-| A | dns.example.com | \<server-ip\> | Server address |
-| AAAA | dns.example.com | \<server-ipv6\> | Server IPv6 address |
+| A | dns.example.com | `<server-ip>` | Server address |
+| AAAA | dns.example.com | `<server-ipv6>` | Server IPv6 address |
 
 ### Maintenance / 日常维护
 

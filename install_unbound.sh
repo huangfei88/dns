@@ -1179,6 +1179,13 @@ validate_config() {
 }
 
 ###############################################################################
+# 检查端口 53 是否被占用
+###############################################################################
+is_port53_in_use() {
+    ss -tlnp 2>/dev/null | grep -q ':53 ' || ss -ulnp 2>/dev/null | grep -q ':53 '
+}
+
+###############################################################################
 # 启动并启用 Unbound
 ###############################################################################
 start_unbound() {
@@ -1193,7 +1200,7 @@ start_unbound() {
     fi
 
     # 检查是否有其他服务占用端口 53（BIND9、dnsmasq 等）
-    if ss -tlnp 2>/dev/null | grep -q ':53 ' || ss -ulnp 2>/dev/null | grep -q ':53 '; then
+    if is_port53_in_use; then
         warn "检测到端口 53 被其他服务占用，正在尝试释放..."
         local dns_services=(named bind9 dnsmasq)
         for svc in "${dns_services[@]}"; do
@@ -1204,7 +1211,7 @@ start_unbound() {
         done
         # 等待端口释放
         sleep 2
-        if ss -tlnp 2>/dev/null | grep -q ':53 ' || ss -ulnp 2>/dev/null | grep -q ':53 '; then
+        if is_port53_in_use; then
             fatal "端口 53 仍被占用，无法启动 Unbound。请手动检查: ss -tlnp | grep ':53 '"
         fi
     fi
@@ -1504,7 +1511,6 @@ disable_unnecessary_services() {
         rsync               # 远程同步服务
         vsftpd              # FTP 服务器
         apache2             # Web 服务器
-        nginx               # 仅在此阶段禁用；NGINX 由单独脚本安装
         squid               # 代理服务器
         snmpd               # SNMP 监控
         telnet.socket       # Telnet（不安全协议）
