@@ -102,17 +102,18 @@ Note:
      │  Port 53      │  │  Port 853     │  │  Port 443     │
      │  DNS (UDP/TCP)│  │  DoT (TLS)    │  │  DoH (HTTPS)  │
      └────────┬──────┘  └────────┬──────┘  └────────┬──────┘
-              │                   │                   │
-              │           ┌──────┴──────────────┐     │
-              │           │  NGINX Reverse Proxy │     │
-              │           │  (separate install)  │     │
-              │           └──────┬──────────────┘     │
-              │                  │   (proxy to 53)    │
-              └──────────────────┼────────────────────┘
+              │                  │                   │
+              │           ┌──────┴───────────────────┘
+              │           │  NGINX Reverse Proxy
+              │           │  ┌─ stream:853 → TCP proxy ─┐
+              │           │  └─ http:443 → proxy_pass  ──┘
+              │           └──────┬──────────────┘
+              │                  │
+              └──────────────────┤
                                  │
                     ┌────────────▼────────────────────────┐
                     │         Unbound DNS Server           │
-                    │         (Port 53 only)               │
+                    │  Port 53 (DNS) + 8443 (DoH backend) │
                     │  ┌─────────────────────────────────┐ │
                     │  │  DNSSEC Validation               │ │
                     │  │  Cache (32MB msg + 64MB rrset)   │ │
@@ -136,6 +137,7 @@ Note:
 | `/etc/unbound/unbound.conf` | Main configuration (includes modular configs) |
 | `/etc/unbound/unbound.conf.d/01-server.conf` | Core server settings, performance, security |
 | `/etc/unbound/unbound.conf.d/02-remote-control.conf` | Remote control (localhost only) |
+| `/etc/unbound/unbound.conf.d/03-doh.conf` | DoH backend (localhost:8443, added with NGINX) |
 | `/etc/unbound/unbound.conf.d/04-blocklist.conf` | Response policy / domain blocklist |
 | `/etc/unbound/blocklist.conf` | Custom domain blocklist entries |
 | `/etc/sysctl.d/99-unbound-dns.conf` | DNS performance + CIS kernel security tuning |
@@ -368,20 +370,449 @@ dig @<server-ip> example.com A | grep "Query time"
 
 > If external queries fail, verify: (1) Azure NSG allows port 53 inbound, (2) UFW is not blocking traffic (`sudo ufw status verbose`), (3) Unbound is listening on all interfaces (`ss -ulnp | grep :53`).
 
-### Step 6: (Optional) Set Up DNS-over-TLS/HTTPS / 配置 DoT/DoH
+### Step 6: Set Up DNS-over-TLS & DNS-over-HTTPS / 配置 DoT 和 DoH
 
-DNS-over-TLS (port 853) and DNS-over-HTTPS (port 443) are handled by a separately installed NGINX reverse proxy. Install and configure NGINX with TLS certificates after Unbound is running:
+DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are provided by NGINX as a reverse proxy in front of Unbound. This section provides complete, production-ready configuration.
 
-1. Point a domain name (e.g., `dns.example.com`) to your server's public IP
-2. Install NGINX and certbot
-3. Configure NGINX to proxy DoT (port 853) and DoH (port 443) to Unbound (port 53)
-4. Obtain TLS certificates via Let's Encrypt
-
-> The firewall already has ports 853 and 443 open in preparation for NGINX. If you do not plan to install NGINX, you can remove these rules:
+> The firewall already has ports 853 and 443 open (configured by the install script). If you do not plan to use DoT/DoH, you can remove these rules:
 > ```bash
 > sudo ufw delete allow 853/tcp
 > sudo ufw delete allow 443/tcp
 > ```
+
+#### 6.1 Prerequisites / 前置条件
+
+1. **Unbound is running** — Complete Steps 1–5 first and verify DNS works on port 53
+2. **Domain name** — Point a domain (e.g., `dns.example.com`) to your server's public IP via A/AAAA records
+3. **DNS propagation** — Wait for DNS records to propagate (check with `dig dns.example.com`)
+
+#### 6.2 Install NGINX and Certbot / 安装 NGINX 和 Certbot
+
+```bash
+# Install NGINX (nginx-full includes the stream module needed for DoT)
+sudo apt-get update
+sudo apt-get install -y nginx certbot python3-certbot-nginx
+
+# Verify NGINX stream module is available
+nginx -V 2>&1 | grep -o with-stream
+# Should output: with-stream
+
+# Stop NGINX temporarily for certificate issuance
+sudo systemctl stop nginx
+```
+
+#### 6.3 Obtain TLS Certificate / 获取 TLS 证书
+
+```bash
+# Obtain certificate using standalone mode (NGINX must be stopped)
+# Replace dns.example.com with your actual domain
+sudo certbot certonly --standalone \
+    -d dns.example.com \
+    --agree-tos \
+    --email admin@example.com \
+    --non-interactive
+
+# Verify the certificate files exist
+ls -la /etc/letsencrypt/live/dns.example.com/
+# Should show: fullchain.pem, privkey.pem, cert.pem, chain.pem
+
+# Set up automatic renewal (certbot auto-renews via systemd timer)
+sudo systemctl enable certbot.timer
+sudo systemctl start certbot.timer
+
+# Create a post-renewal hook to reload NGINX after certificate renewal
+sudo mkdir -p /etc/letsencrypt/renewal-hooks/post
+cat <<'HOOK' | sudo tee /etc/letsencrypt/renewal-hooks/post/reload-nginx.sh
+#!/bin/bash
+systemctl reload nginx 2>/dev/null || true
+HOOK
+sudo chmod 755 /etc/letsencrypt/renewal-hooks/post/reload-nginx.sh
+```
+
+#### 6.4 Configure NGINX for DoT (DNS-over-TLS) / 配置 DoT
+
+DoT uses NGINX's `stream` module to terminate TLS on port 853 and proxy raw TCP DNS traffic to Unbound on port 53.
+
+**Step 1: Enable stream module in NGINX main config**
+
+```bash
+# Check if stream block loading is already present
+grep -q 'stream' /etc/nginx/nginx.conf && echo "stream found" || echo "need to add stream"
+
+# Edit nginx.conf to include stream configuration
+# The stream block must be at the TOP LEVEL (same level as 'http'), NOT inside 'http {}'
+sudo nano /etc/nginx/nginx.conf
+```
+
+Add the following line **before** the `http {` block in `/etc/nginx/nginx.conf`:
+
+```nginx
+# Load stream configuration for DNS-over-TLS (DoT)
+include /etc/nginx/stream.conf.d/*.conf;
+```
+
+The final structure of `nginx.conf` should look like:
+
+```nginx
+# ... (existing worker_processes, events, etc.)
+
+# DoT stream configuration (MUST be outside http block)
+include /etc/nginx/stream.conf.d/*.conf;
+
+http {
+    # ... (existing http configuration)
+}
+```
+
+**Step 2: Create DoT stream configuration**
+
+```bash
+# Create stream config directory
+sudo mkdir -p /etc/nginx/stream.conf.d
+
+# Create DoT configuration
+# Replace dns.example.com with your actual domain
+cat <<'DOTCONF' | sudo tee /etc/nginx/stream.conf.d/dns-over-tls.conf
+# =============================================================================
+# DNS-over-TLS (DoT) - NGINX Stream Proxy
+# Terminates TLS on port 853 and proxies to Unbound on TCP port 53
+# =============================================================================
+stream {
+    # Upstream: Unbound DNS server (TCP)
+    upstream unbound_tcp {
+        server 127.0.0.1:53;
+    }
+
+    # DoT server on port 853
+    server {
+        listen 853 ssl;
+        listen [::]:853 ssl;
+
+        # TLS certificate (Let's Encrypt)
+        ssl_certificate     /etc/letsencrypt/live/dns.example.com/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/dns.example.com/privkey.pem;
+
+        # TLS security settings (PCI-DSS compliant)
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:DoT_SSL:10m;
+        ssl_session_timeout 1h;
+        ssl_session_tickets off;
+
+        # Proxy to Unbound
+        proxy_pass unbound_tcp;
+
+        # Timeouts
+        proxy_timeout 10s;
+        proxy_connect_timeout 5s;
+    }
+}
+DOTCONF
+
+# IMPORTANT: Replace dns.example.com with your actual domain in the file
+sudo sed -i 's/dns.example.com/YOUR_DOMAIN_HERE/g' /etc/nginx/stream.conf.d/dns-over-tls.conf
+# ^^^ Replace YOUR_DOMAIN_HERE with your actual domain
+```
+
+#### 6.5 Configure NGINX for DoH (DNS-over-HTTPS) / 配置 DoH
+
+DoH uses NGINX's `http` module to terminate HTTPS on port 443 and proxy HTTP requests to Unbound's built-in HTTP endpoint.
+
+**Step 1: Enable Unbound's DoH backend**
+
+Create an additional Unbound configuration file for the local DoH listener:
+
+```bash
+cat <<'DOHCONF' | sudo tee /etc/unbound/unbound.conf.d/03-doh.conf
+# =============================================================================
+# DNS-over-HTTPS (DoH) 本地后端配置
+# Unbound 在本地 127.0.0.1:8443 提供 HTTP DoH 接口
+# NGINX 负责公网 TLS 终止，然后将请求转发到此接口
+# =============================================================================
+server:
+    # 仅监听本地回环地址（NGINX 反向代理访问）
+    interface: 127.0.0.1@8443
+
+    # 启用 HTTPS/DoH 端口
+    https-port: 8443
+
+    # DoH 端点路径（RFC 8484 标准）
+    http-endpoint: "/dns-query"
+
+    # 允许不加密的下游连接（因为 NGINX 已处理 TLS）
+    http-notls-downstream: yes
+DOHCONF
+
+# Verify configuration is valid
+sudo unbound-checkconf
+
+# Reload Unbound to apply DoH backend
+sudo unbound-control reload
+# Or restart if reload fails:
+# sudo systemctl restart unbound
+
+# Verify Unbound is listening on port 8443
+ss -tlnp | grep 8443
+```
+
+> **Note**: The `http-notls-downstream: yes` option requires Unbound 1.17.0+. Debian 13 (Trixie) ships Unbound 1.19+ which supports this. If you encounter an error, check your Unbound version with `unbound -V`.
+
+**Step 2: Create NGINX HTTP configuration for DoH**
+
+```bash
+# Create DoH site configuration
+# Replace dns.example.com with your actual domain
+cat <<'DOHSITE' | sudo tee /etc/nginx/sites-available/dns-over-https
+# =============================================================================
+# DNS-over-HTTPS (DoH) - NGINX HTTP Reverse Proxy
+# Terminates TLS on port 443, proxies /dns-query to Unbound's DoH backend
+# =============================================================================
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name dns.example.com;
+
+    # TLS certificate (Let's Encrypt)
+    ssl_certificate     /etc/letsencrypt/live/dns.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/dns.example.com/privkey.pem;
+
+    # TLS security settings (PCI-DSS compliant)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:DoH_SSL:10m;
+    ssl_session_timeout 1h;
+    ssl_session_tickets off;
+
+    # HSTS (Strict Transport Security)
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+
+    # Security headers
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
+    # DoH endpoint (RFC 8484)
+    location /dns-query {
+        # Proxy to Unbound's local DoH backend (no TLS, handled by NGINX)
+        proxy_pass http://127.0.0.1:8443/dns-query;
+
+        # HTTP settings
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # Required content types for DoH (RFC 8484)
+        # GET requests use ?dns= parameter, POST requests use application/dns-message body
+        proxy_set_header Accept "application/dns-message";
+
+        # Timeout settings
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 10s;
+
+        # Disable buffering for low-latency DNS responses
+        proxy_buffering off;
+
+        # Limit request body size (DNS messages are small)
+        client_max_body_size 512;
+    }
+
+    # Health check endpoint (optional, for monitoring)
+    location /health {
+        access_log off;
+        return 200 "OK\n";
+        add_header Content-Type text/plain;
+    }
+
+    # Deny all other paths
+    location / {
+        return 404;
+    }
+}
+
+# HTTP to HTTPS redirect
+server {
+    listen 80;
+    listen [::]:80;
+    server_name dns.example.com;
+    return 301 https://$host$request_uri;
+}
+DOHSITE
+
+# IMPORTANT: Replace dns.example.com with your actual domain
+sudo sed -i 's/dns.example.com/YOUR_DOMAIN_HERE/g' /etc/nginx/sites-available/dns-over-https
+# ^^^ Replace YOUR_DOMAIN_HERE with your actual domain
+
+# Enable the site
+sudo ln -sf /etc/nginx/sites-available/dns-over-https /etc/nginx/sites-enabled/
+
+# Remove default NGINX site (optional but recommended)
+sudo rm -f /etc/nginx/sites-enabled/default
+```
+
+#### 6.6 Start NGINX / 启动 NGINX
+
+```bash
+# Test NGINX configuration syntax
+sudo nginx -t
+
+# If the test passes, start NGINX
+sudo systemctl enable nginx
+sudo systemctl start nginx
+
+# Verify NGINX is running and listening on the correct ports
+sudo ss -tlnp | grep -E ':(443|853)\s'
+# Should show NGINX listening on both 443 and 853
+```
+
+#### 6.7 Test DoT and DoH / 测试 DoT 和 DoH
+
+**Test DNS-over-TLS (DoT):**
+
+```bash
+# Install kdig (part of knot-dnsutils) for DoT testing
+sudo apt-get install -y knot-dnsutils
+
+# Test DoT from the server itself
+kdig @127.0.0.1 +tls -p 853 example.com A
+
+# Test DoT from an external machine (replace with your domain or IP)
+kdig @dns.example.com +tls example.com A
+
+# Test with specific TLS hostname verification
+kdig @<server-ip> +tls-host=dns.example.com +tls example.com A
+
+# Verify TLS certificate
+echo | openssl s_client -connect dns.example.com:853 -servername dns.example.com 2>/dev/null | openssl x509 -noout -subject -dates
+```
+
+**Test DNS-over-HTTPS (DoH):**
+
+```bash
+# Test DoH with curl (POST method, RFC 8484 wire format)
+echo -n 'q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE=' | base64 -d | \
+    curl -sSf -H 'content-type: application/dns-message' \
+    --data-binary @- \
+    'https://dns.example.com/dns-query' | \
+    od -A x -t x1
+
+# Test DoH with curl (JSON format, for debugging)
+curl -sSf -H 'accept: application/dns-json' \
+    'https://dns.example.com/dns-query?name=example.com&type=A'
+
+# Test health endpoint
+curl -sSf https://dns.example.com/health
+
+# Verify TLS certificate for port 443
+echo | openssl s_client -connect dns.example.com:443 -servername dns.example.com 2>/dev/null | openssl x509 -noout -subject -dates
+```
+
+**Expected results:**
+- DoT queries via `kdig` should return valid DNS responses
+- DoH POST requests should return binary DNS response data
+- DoH JSON queries should return a JSON object with DNS answer data
+- TLS certificates should show your domain name and valid dates
+
+#### 6.8 Configure Android / iOS Private DNS / 配置客户端私有 DNS
+
+**Android 9+ (Private DNS / DoT):**
+1. Settings → Network & Internet → Private DNS
+2. Select "Private DNS provider hostname"
+3. Enter: `dns.example.com`
+
+**iOS 14+ / macOS (DoH):**
+
+Create and install a DNS configuration profile (`.mobileconfig`):
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>DNSSettings</key>
+            <dict>
+                <key>DNSProtocol</key>
+                <string>HTTPS</string>
+                <key>ServerURL</key>
+                <string>https://dns.example.com/dns-query</string>
+            </dict>
+            <key>PayloadType</key>
+            <string>com.apple.dnsSettings.managed</string>
+            <key>PayloadIdentifier</key>
+            <string>com.example.dns.doh</string>
+            <key>PayloadUUID</key>
+            <string>A1B2C3D4-E5F6-7890-ABCD-EF1234567890</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+        </dict>
+    </array>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadIdentifier</key>
+    <string>com.example.dns</string>
+    <key>PayloadUUID</key>
+    <string>F1E2D3C4-B5A6-7890-FEDC-BA0987654321</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadDisplayName</key>
+    <string>Custom DNS (DoH)</string>
+</dict>
+</plist>
+```
+
+**Windows 11 (DoH):**
+1. Settings → Network & Internet → Wi-Fi / Ethernet → DNS
+2. Set DNS to Manual
+3. Enter server IP and enable "DNS over HTTPS"
+4. Template: `https://dns.example.com/dns-query`
+
+**Firefox (DoH):**
+1. Settings → Privacy & Security → DNS over HTTPS
+2. Select "Custom" and enter: `https://dns.example.com/dns-query`
+
+#### 6.9 Troubleshooting DoT/DoH / DoT/DoH 故障排查
+
+```bash
+# Check NGINX error logs
+sudo tail -20 /var/log/nginx/error.log
+
+# Check if NGINX is listening on 853 and 443
+sudo ss -tlnp | grep -E ':(443|853)\s'
+
+# Check if Unbound DoH backend is listening on 8443
+sudo ss -tlnp | grep ':8443\s'
+
+# Test Unbound DoH backend directly (bypassing NGINX)
+curl -sSf http://127.0.0.1:8443/dns-query?name=example.com&type=A
+
+# Check TLS certificate validity
+sudo certbot certificates
+
+# Renew certificate manually if needed
+sudo certbot renew --dry-run
+
+# Check NGINX configuration for errors
+sudo nginx -t
+
+# Verify Unbound configuration including DoH
+sudo unbound-checkconf
+
+# Check firewall allows traffic
+sudo ufw status | grep -E '(443|853)'
+
+# Debug DoT with verbose output
+kdig @dns.example.com +tls +tls-host=dns.example.com -d example.com A
+```
+
+**Common issues:**
+- **"Connection refused" on port 853**: Ensure NGINX is running and the stream config is loaded. Check that the `include stream.conf.d/*.conf;` line is OUTSIDE the `http {}` block.
+- **"502 Bad Gateway" on DoH**: Ensure Unbound is listening on port 8443. Run `unbound-checkconf` and check for `https-port` errors. If `http-notls-downstream` is not recognized, your Unbound version may be too old.
+- **Certificate errors**: Run `sudo certbot certificates` to check certificate status. Ensure the domain matches.
+- **"SSL handshake failed"**: Check that `ssl_protocols` and `ssl_ciphers` in NGINX match what the client supports.
 
 ### Step 7: Configure DNS Records / 配置 DNS 记录
 
