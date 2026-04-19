@@ -1,3 +1,5 @@
+**English** | [中文](README.zh-CN.md)
+
 # Enterprise-Grade Unbound Public DNS Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -185,9 +187,11 @@ dig @<server-ip> +dnssec example.com A
 # Test DNS-over-TLS (requires NGINX proxy and kdig from knot-dnsutils)
 kdig @<server-ip> +tls example.com A
 
-# Test DNS-over-HTTPS (requires NGINX proxy)
-curl -H 'accept: application/dns-json' \
-  'https://dns.example.com/dns-query?name=example.com&type=A'
+# Test DNS-over-HTTPS (requires NGINX proxy, RFC 8484 wire format)
+# Note: Unbound's DoH only supports application/dns-message (wire format),
+# NOT application/dns-json. Use base64url-encoded DNS query:
+curl -sSf 'https://dns.example.com/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
+    od -A x -t x1
 
 # Verify DNSSEC rejects invalid signatures
 dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
