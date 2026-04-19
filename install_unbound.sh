@@ -391,6 +391,7 @@ net.ipv4.ip_local_port_range = 1024 65535
 # 禁用 IP 转发（CIS 3.1.1）- DNS 服务器不需要路由功能
 net.ipv4.ip_forward = 0
 net.ipv6.conf.all.forwarding = 0
+net.ipv6.conf.default.forwarding = 0
 
 # 禁用 ICMP 重定向发送（CIS 3.1.2）
 net.ipv4.conf.all.send_redirects = 0
@@ -455,6 +456,15 @@ net.core.bpf_jit_harden = 2
 
 # 限制 ptrace 范围（CIS 1.5.4）
 kernel.yama.ptrace_scope = 2
+
+# 禁用 Magic SysRq 键（CIS 1.5.2）
+kernel.sysrq = 0
+
+# 限制非特权用户使用性能计数器（CIS 安全加固）
+kernel.perf_event_paranoid = 3
+
+# 禁止非特权用户查看内核符号地址（CIS 安全加固）
+kernel.unprivileged_userns_clone = 0
 SYSCTL
 
     sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 参数可能未成功应用。"
@@ -632,7 +642,9 @@ server:
     private-address: 198.18.0.0/15
     private-address: 198.51.100.0/24
     private-address: 203.0.113.0/24
+    private-address: 192.0.0.0/24
     private-address: 240.0.0.0/4
+    private-address: 255.255.255.255/32
     private-address: ::1/128
     private-address: ::ffff:0:0/96
     private-address: 2001:db8::/32
@@ -989,7 +1001,7 @@ configure_logrotate() {
     cat > /etc/logrotate.d/unbound <<'EOF'
 /var/log/unbound/unbound.log {
     daily
-    rotate 90
+    rotate 365
     compress
     delaycompress
     missingok
@@ -1002,7 +1014,7 @@ configure_logrotate() {
 }
 EOF
 
-    info "日志轮转已配置（保留 90 天以满足 PCI-DSS 合规要求）。"
+    info "日志轮转已配置（保留 365 天以满足 PCI-DSS v4.0 Req 10.7.1 要求：至少12个月审计日志）。"
 }
 
 ###############################################################################
@@ -1560,7 +1572,7 @@ print_summary() {
 ║    ✓ DNS 性能内核调优                                                        ║
 ║    ✓ CIS 基准内核安全加固                                                    ║
 ║    ✓ 登录横幅和核心转储限制                                                  ║
-║    ✓ 90 天日志保留                                                           ║
+║    ✓ 365 天日志保留（PCI-DSS v4.0 Req 10.7.1）                              ║
 ║    ✓ 快速服务器选择优化                                                      ║
 ║                                                                            ║
 ║  备份位置: ${BACKUP_DIR}                         ║
@@ -1682,7 +1694,7 @@ main() {
         info "  8.  配置域名黑名单/RPZ"
         info "  9.  配置 UFW 防火墙规则"
         info "  10. 配置 Fail2Ban DNS 滥用防护"
-        info "  11. 配置日志轮转（90 天保留）"
+        info "  11. 配置日志轮转（365 天保留，PCI-DSS v4.0 合规）"
         info "  12. 应用 Systemd 服务安全加固"
         info "  13. 创建监控和健康检查脚本及 systemd 定时器"
         info "  14. 禁用不必要的服务（CIS 基准）"
