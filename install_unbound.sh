@@ -449,14 +449,20 @@ setup_dnssec() {
 
     # 下载最新的根提示文件
     local root_hints="/var/lib/unbound/root.hints"
-    local root_hints_tmp
-    root_hints_tmp="$(mktemp)" || { warn "无法创建临时文件，使用系统默认根提示。"; cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true; root_hints_tmp=""; }
-    if [[ -n "$root_hints_tmp" ]] && curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
-        mv "$root_hints_tmp" "$root_hints"
-        info "已下载最新的根提示文件。"
+    local root_hints_tmp=""
+    if root_hints_tmp="$(mktemp)"; then
+        # 立即设置 RETURN 陷阱，确保临时文件在函数退出时被清理
+        trap 'rm -f "$root_hints_tmp"' RETURN
+        if curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
+            mv "$root_hints_tmp" "$root_hints"
+            info "已下载最新的根提示文件。"
+        else
+            rm -f "$root_hints_tmp"
+            warn "无法下载根提示文件或文件为空，使用系统默认值。"
+            cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
+        fi
     else
-        rm -f "$root_hints_tmp"
-        warn "无法下载根提示文件或文件为空，使用系统默认值。"
+        warn "无法创建临时文件，使用系统默认根提示。"
         cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
     fi
     chown unbound:unbound "$root_hints"
@@ -576,6 +582,8 @@ server:
     infra-cache-numhosts: 50000
 
     # --- DNSSEC ---
+    # 显式声明模块链，确保 DNSSEC 验证在迭代解析之前执行
+    module-config: "validator iterator"
     auto-trust-anchor-file: "/var/lib/unbound/root.key"
     root-hints: "/var/lib/unbound/root.hints"
 
@@ -1028,12 +1036,12 @@ STATS
 
     chmod 755 /usr/local/bin/unbound-stats
 
-    # --- 根提示更新脚本（每月定时任务）---
+    # --- 根提示更新脚本（每月 systemd 定时器）---
     cat > /usr/local/bin/update-root-hints <<'ROOTHINTS'
 #!/usr/bin/env bash
 ###############################################################################
 # 更新 DNS 根提示文件
-# 通过 cron 每月执行
+# 通过 systemd timer 每月执行
 ###############################################################################
 set -euo pipefail
 
@@ -1058,19 +1066,86 @@ ROOTHINTS
 
     chmod 755 /usr/local/bin/update-root-hints
 
-    # 每月定时更新根提示文件
-    cat > /etc/cron.d/update-root-hints <<'EOF'
-# 每月更新 DNS 根提示文件
-0 3 1 * * root /usr/local/bin/update-root-hints
-EOF
-    chmod 644 /etc/cron.d/update-root-hints
+    # --- systemd 定时器：每月更新根提示文件 ---
+    cat > /etc/systemd/system/update-root-hints.service <<'EOF'
+[Unit]
+Description=Update DNS root hints file
+After=network-online.target
+Wants=network-online.target
 
-    # --- DNSSEC 信任锚更新（每周定时任务）---
-    cat > /etc/cron.d/unbound-anchor <<'EOF'
-# 每周更新 DNSSEC 信任锚
-0 4 * * 0 root /usr/sbin/unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null; systemctl reload unbound 2>/dev/null || true
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-root-hints
 EOF
-    chmod 644 /etc/cron.d/unbound-anchor
+
+    cat > /etc/systemd/system/update-root-hints.timer <<'EOF'
+[Unit]
+Description=Monthly DNS root hints update
+
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now update-root-hints.timer 2>/dev/null || true
+
+    # --- DNSSEC 信任锚更新脚本（每周 systemd 定时器）---
+    cat > /usr/local/bin/update-trust-anchor <<'TRUSTANCHOR'
+#!/usr/bin/env bash
+###############################################################################
+# 更新 DNSSEC 信任锚
+# 通过 systemd timer 每周执行
+###############################################################################
+set -euo pipefail
+
+anchor_exit=0
+/usr/sbin/unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null || anchor_exit=$?
+if [[ $anchor_exit -eq 0 ]]; then
+    logger -t "trust-anchor-update" "DNSSEC 信任锚无需更新"
+elif [[ $anchor_exit -eq 1 ]]; then
+    logger -t "trust-anchor-update" "DNSSEC 信任锚已更新"
+else
+    logger -t "trust-anchor-update" "unbound-anchor 执行失败 (退出码: $anchor_exit)"
+fi
+if ! systemctl reload unbound 2>/dev/null; then
+    logger -t "trust-anchor-update" "Unbound 重载失败，服务可能未运行"
+fi
+logger -t "trust-anchor-update" "DNSSEC 信任锚更新任务完成"
+TRUSTANCHOR
+
+    chmod 755 /usr/local/bin/update-trust-anchor
+
+    cat > /etc/systemd/system/update-trust-anchor.service <<'EOF'
+[Unit]
+Description=Update DNSSEC trust anchor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-trust-anchor
+EOF
+
+    cat > /etc/systemd/system/update-trust-anchor.timer <<'EOF'
+[Unit]
+Description=Weekly DNSSEC trust anchor update
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now update-trust-anchor.timer 2>/dev/null || true
 
     info "监控和维护脚本创建完成。"
 }
@@ -1450,7 +1525,7 @@ main() {
         info "  10. 配置 Fail2Ban DNS 滥用防护"
         info "  11. 配置日志轮转（90 天保留）"
         info "  12. 应用 Systemd 服务安全加固"
-        info "  13. 创建监控和健康检查脚本"
+        info "  13. 创建监控和健康检查脚本及 systemd 定时器"
         info "  14. SSH 安全加固（CIS 基准）"
         info "  15. 配置登录横幅"
         info "  16. 验证配置文件语法"

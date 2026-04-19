@@ -37,8 +37,8 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 ### Monitoring & Maintenance
 - Health check script (`/usr/local/bin/unbound-health-check`)
 - Statistics collection (`/usr/local/bin/unbound-stats`)
-- Automatic root hints updates (monthly)
-- Automatic DNSSEC trust anchor updates (weekly)
+- Automatic root hints updates (monthly via systemd timer)
+- Automatic DNSSEC trust anchor updates (weekly via systemd timer)
 - Log rotation with 90-day retention
 
 ## Requirements
