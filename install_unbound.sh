@@ -374,6 +374,8 @@ net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_max_orphans = 65536
 net.ipv4.tcp_window_scaling = 1
+# TCP 时间戳必须启用：tcp_tw_reuse 依赖时间戳判断 TIME-WAIT 重用安全性，
+# 且 PAWS（防回绕序列号保护）也需要时间戳。现代安全指南不再建议禁用。
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_no_metrics_save = 1
@@ -1592,6 +1594,7 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/unbound
 PrivateTmp=yes
+# AF_UNIX 需要用于 systemctl reload unbound（通过 D-Bus 与 systemd 通信）
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
