@@ -510,9 +510,9 @@ stream {
 }
 DOTCONF
 
-# IMPORTANT: Replace dns.example.com with your actual domain in the file
-sudo sed -i 's/dns.example.com/YOUR_DOMAIN_HERE/g' /etc/nginx/stream.conf.d/dns-over-tls.conf
-# ^^^ Replace YOUR_DOMAIN_HERE with your actual domain
+# IMPORTANT: Replace YOUR_ACTUAL_DOMAIN below with your real domain, then run:
+# Example: sudo sed -i 's/dns.example.com/dns.myserver.com/g' /etc/nginx/stream.conf.d/dns-over-tls.conf
+sudo sed -i 's/dns.example.com/YOUR_ACTUAL_DOMAIN/g' /etc/nginx/stream.conf.d/dns-over-tls.conf
 ```
 
 #### 6.5 Configure NGINX for DoH (DNS-over-HTTPS) / 配置 DoH
@@ -614,8 +614,8 @@ server {
         # Disable buffering for low-latency DNS responses
         proxy_buffering off;
 
-        # Limit request body size (DNS messages are small)
-        client_max_body_size 512;
+        # Limit request body size (DNS messages are small, max 512 bytes typical)
+        client_max_body_size 4k;
     }
 
     # Health check endpoint (optional, for monitoring)
@@ -640,9 +640,9 @@ server {
 }
 DOHSITE
 
-# IMPORTANT: Replace dns.example.com with your actual domain
-sudo sed -i 's/dns.example.com/YOUR_DOMAIN_HERE/g' /etc/nginx/sites-available/dns-over-https
-# ^^^ Replace YOUR_DOMAIN_HERE with your actual domain
+# IMPORTANT: Replace YOUR_ACTUAL_DOMAIN below with your real domain, then run:
+# Example: sudo sed -i 's/dns.example.com/dns.myserver.com/g' /etc/nginx/sites-available/dns-over-https
+sudo sed -i 's/dns.example.com/YOUR_ACTUAL_DOMAIN/g' /etc/nginx/sites-available/dns-over-https
 
 # Enable the site
 sudo ln -sf /etc/nginx/sites-available/dns-over-https /etc/nginx/sites-enabled/
@@ -697,9 +697,13 @@ echo -n 'q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE=' | base64 -d | \
     'https://dns.example.com/dns-query' | \
     od -A x -t x1
 
-# Test DoH with curl (JSON format, for debugging)
-curl -sSf -H 'accept: application/dns-json' \
-    'https://dns.example.com/dns-query?name=example.com&type=A'
+# Test DoH with curl (wire format via GET with base64url dns parameter)
+# This queries example.com A record
+curl -sSf 'https://dns.example.com/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
+    od -A x -t x1
+
+# Note: Unbound's DoH supports RFC 8484 wire format (application/dns-message) only.
+# JSON format (application/dns-json) is NOT supported by Unbound's native DoH endpoint.
 
 # Test health endpoint
 curl -sSf https://dns.example.com/health
