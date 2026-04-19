@@ -374,7 +374,7 @@ dig @<server-ip> example.com A | grep "Query time"
 
 DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are provided by NGINX as a reverse proxy in front of Unbound. This section provides complete, production-ready configuration.
 
-> The install script does **not** open ports 853 or 443 (it follows the principle of least privilege). You need to open them manually before starting NGINX:
+> The install script does **not** open ports 853 or 443 (it follows the principle of least privilege). Before starting NGINX, open them with:
 > ```bash
 > sudo ufw allow 853/tcp
 > sudo ufw allow 443/tcp
