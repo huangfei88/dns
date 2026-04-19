@@ -11,10 +11,6 @@
 #   - Systemd 服务沙箱隔离
 #   - UFW 防火墙（基于 nftables 后端）
 #   - 全面的日志记录和监控
-#   - 系统审计 auditd（PCI-DSS Req 10.2）
-#   - NTP 时间同步（CIS 2.2.1 / PCI-DSS Req 10.6）
-#   - 自动安全更新 unattended-upgrades（PCI-DSS Req 6.3.3）
-#   - SSH 安全加固（CIS 5.2，强加密算法 + 密钥认证）
 #
 # 注意: DOT (DNS-over-TLS, 端口 853) 和 DoH (DNS-over-HTTPS, 端口 443) 由
 #       单独安装的 NGINX 反向代理实现，SSL 证书也在安装 NGINX 时申请。
@@ -33,7 +29,7 @@ IFS=$'\n\t'
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.7.0"
+readonly SCRIPT_VERSION="1.6.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -336,9 +332,6 @@ install_packages() {
         net-tools
         sudo
         e2fsprogs
-        auditd
-        unattended-upgrades
-        apt-listchanges
     )
 
     apt-get install -y -qq --no-install-recommends -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" "${packages[@]}"
@@ -1098,189 +1091,6 @@ EOF
 }
 
 ###############################################################################
-# 时间同步配置（CIS 2.2.1 / PCI-DSS Req 10.6）
-###############################################################################
-configure_time_sync() {
-    info "正在配置时间同步（CIS 2.2.1 / PCI-DSS Req 10.6）..."
-
-    # Debian 13 默认使用 systemd-timesyncd 进行时间同步
-    if systemctl list-unit-files systemd-timesyncd.service &>/dev/null; then
-        # 确保 systemd-timesyncd 已启用并正在运行
-        systemctl enable systemd-timesyncd 2>/dev/null || true
-        systemctl start systemd-timesyncd 2>/dev/null || true
-
-        # 配置 NTP 服务器（使用 Debian 默认 NTP 池）
-        mkdir -p /etc/systemd/timesyncd.conf.d
-        cat > /etc/systemd/timesyncd.conf.d/99-pci-dss.conf <<'EOF'
-# PCI-DSS Req 10.6 / CIS 2.2.1 - 时间同步配置
-[Time]
-NTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org
-FallbackNTP=time.cloudflare.com time.google.com
-EOF
-        chmod 0644 /etc/systemd/timesyncd.conf.d/99-pci-dss.conf
-        chown root:root /etc/systemd/timesyncd.conf.d/99-pci-dss.conf
-
-        systemctl restart systemd-timesyncd 2>/dev/null || true
-
-        if timedatectl show --property=NTPSynchronized --value 2>/dev/null | grep -qi "yes"; then
-            info "NTP 时间同步已激活并同步。"
-        else
-            warn "NTP 时间同步已配置但尚未完成同步（可能需要几秒钟）。"
-        fi
-    else
-        warn "systemd-timesyncd 不可用。请手动安装并配置 NTP 时间同步服务。"
-    fi
-}
-
-###############################################################################
-# 系统审计配置（PCI-DSS Req 10.2）
-###############################################################################
-configure_auditd() {
-    info "正在配置系统审计（PCI-DSS Req 10.2）..."
-
-    # 创建 PCI-DSS 合规审计规则
-    cat > /etc/audit/rules.d/99-pci-dss.rules <<'EOF'
-## =============================================================================
-## PCI-DSS Req 10.2 系统审计规则
-## =============================================================================
-
-## 首先删除所有已有规则
--D
-
-## 设置缓冲区大小（适配 1 GiB 内存环境）
--b 4096
-
-## 失败模式: 1=printk（记录日志并继续）
--f 1
-
-## --- PCI-DSS 10.2.1: 审计所有个人用户对持卡人数据的访问 ---
-## （DNS 服务器不存储持卡人数据，但审计关键配置文件访问）
-
-## --- PCI-DSS 10.2.2: 审计 root/管理员执行的所有操作 ---
--a always,exit -F arch=b64 -F euid=0 -S execve -k root-commands
-
-## --- PCI-DSS 10.2.3: 审计审计日志的访问 ---
--w /var/log/audit/ -p wa -k audit-log-access
--w /etc/audit/ -p wa -k audit-config-change
-
-## --- PCI-DSS 10.2.4: 审计无效的逻辑访问尝试 ---
--a always,exit -F arch=b64 -S open,openat,creat -F exit=-EACCES -k access-denied
--a always,exit -F arch=b64 -S open,openat,creat -F exit=-EPERM -k access-denied
-
-## --- PCI-DSS 10.2.5: 审计身份识别和认证机制的使用和更改 ---
--w /etc/passwd -p wa -k identity-change
--w /etc/shadow -p wa -k identity-change
--w /etc/group -p wa -k identity-change
--w /etc/gshadow -p wa -k identity-change
--w /etc/security/opasswd -p wa -k identity-change
--w /etc/pam.d/ -p wa -k pam-config-change
--w /etc/ssh/sshd_config -p wa -k ssh-config-change
--w /etc/ssh/sshd_config.d/ -p wa -k ssh-config-change
-
-## --- PCI-DSS 10.2.6: 审计审计日志的初始化、停止和暂停 ---
-## （由 auditd 自身处理）
-
-## --- PCI-DSS 10.2.7: 审计系统级对象的创建和删除 ---
--a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=-1 -k file-deletion
-
-## --- CIS 基准 - 时间变更审计 ---
--a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change
--w /etc/localtime -p wa -k time-change
-
-## --- CIS 基准 - 网络配置变更审计 ---
--w /etc/hosts -p wa -k network-config
--w /etc/network/ -p wa -k network-config
--w /etc/sysctl.d/ -p wa -k sysctl-change
--w /etc/sysctl.conf -p wa -k sysctl-change
-
-## --- DNS 服务器特定审计 ---
--w /etc/unbound/ -p wa -k dns-config-change
--w /var/lib/unbound/ -p wa -k dns-data-change
--w /usr/local/bin/unbound-health-check -p x -k dns-admin
--w /usr/local/bin/unbound-stats -p x -k dns-admin
-
-## --- 审计 sudo 使用 ---
--w /var/log/sudo.log -p wa -k sudo-log
--w /etc/sudoers -p wa -k sudo-config
--w /etc/sudoers.d/ -p wa -k sudo-config
-
-## --- 使规则不可变（需要重启才能更改审计规则）---
-## 重要: 此选项设置后，任何审计规则变更都需要系统重启才能生效。
-## 这是 PCI-DSS 安全最佳实践，防止攻击者在入侵后篡改审计规则。
-## 如需紧急修改审计规则，必须先重启系统。
--e 2
-EOF
-    chmod 0640 /etc/audit/rules.d/99-pci-dss.rules
-    chown root:root /etc/audit/rules.d/99-pci-dss.rules
-
-    # 配置 auditd 日志保留（PCI-DSS 合规）
-    if [[ -f /etc/audit/auditd.conf ]]; then
-        # 设置日志文件大小和保留数量
-        sed -i 's/^max_log_file[[:space:]]*=.*/max_log_file = 50/' /etc/audit/auditd.conf
-        sed -i 's/^num_logs[[:space:]]*=.*/num_logs = 30/' /etc/audit/auditd.conf
-        sed -i 's/^max_log_file_action[[:space:]]*=.*/max_log_file_action = rotate/' /etc/audit/auditd.conf
-        # 磁盘空间不足时的处理策略
-        sed -i 's/^space_left_action[[:space:]]*=.*/space_left_action = email/' /etc/audit/auditd.conf
-        sed -i 's/^admin_space_left_action[[:space:]]*=.*/admin_space_left_action = halt/' /etc/audit/auditd.conf
-        chmod 0640 /etc/audit/auditd.conf
-        chown root:root /etc/audit/auditd.conf
-    fi
-
-    systemctl enable auditd 2>/dev/null || true
-    systemctl restart auditd 2>/dev/null || warn "auditd 重启遇到问题（将在系统重启后启动）"
-
-    info "系统审计配置完成（PCI-DSS Req 10.2 合规）。"
-}
-
-###############################################################################
-# 自动安全更新配置（PCI-DSS Req 6.3.3）
-###############################################################################
-configure_auto_updates() {
-    info "正在配置自动安全更新（PCI-DSS Req 6.3.3）..."
-
-    # 配置 unattended-upgrades 仅安装安全更新
-    cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
-// PCI-DSS Req 6.3.3 - 自动安全补丁更新配置
-Unattended-Upgrade::Origins-Pattern {
-    "origin=Debian,codename=${distro_codename},label=Debian-Security";
-    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
-};
-
-// 自动移除不再需要的依赖
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-
-// 自动移除不再需要的内核包
-Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
-
-// 如果需要重启，自动重启（凌晨 3:00）
-// 注意: 管理员应根据服务可用性要求和维护窗口调整此时间
-// 公共 DNS 服务器建议在低流量时段执行自动重启
-Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "03:00";
-
-// 启用系统日志记录
-Unattended-Upgrade::SyslogEnable "true";
-Unattended-Upgrade::SyslogFacility "daemon";
-EOF
-    chmod 0644 /etc/apt/apt.conf.d/50unattended-upgrades
-    chown root:root /etc/apt/apt.conf.d/50unattended-upgrades
-
-    # 启用自动更新定时任务
-    cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-APT::Periodic::AutocleanInterval "7";
-EOF
-    chmod 0644 /etc/apt/apt.conf.d/20auto-upgrades
-    chown root:root /etc/apt/apt.conf.d/20auto-upgrades
-
-    systemctl enable unattended-upgrades 2>/dev/null || true
-    systemctl start unattended-upgrades 2>/dev/null || true
-
-    info "自动安全更新已配置（每日检查 Debian 安全仓库更新）。"
-}
-
-###############################################################################
 # Systemd 服务安全加固
 ###############################################################################
 harden_systemd_service() {
@@ -1848,14 +1658,10 @@ print_summary() {
 ║    ✓ deny-any 已启用                                                        ║
 ║    ✓ DNS 性能内核调优                                                        ║
 ║    ✓ CIS 基准内核安全加固                                                    ║
-║    ✓ SSH 安全加固（CIS 5.2，强加密算法 + 密钥认证强制）                       ║
+║    ✓ SSH 安全加固（CIS 基准 5.2，强加密算法）                                 ║
 ║    ✓ 登录横幅和核心转储限制                                                  ║
 ║    ✓ 365 天日志保留（PCI-DSS v4.0 Req 10.7.1）                              ║
 ║    ✓ 快速服务器选择优化                                                      ║
-║    ✓ NTP 时间同步（CIS 2.2.1 / PCI-DSS Req 10.6）                          ║
-║    ✓ 系统审计 auditd（PCI-DSS Req 10.2 合规审计规则）                        ║
-║    ✓ 自动安全更新 unattended-upgrades（PCI-DSS Req 6.3.3）                  ║
-║    ✓ 不必要服务已遮蔽 systemctl mask（CIS 2.1/2.2）                         ║
 ║                                                                            ║
 ║  备份位置: ${BACKUP_DIR}                         ║
 ║  安装日志: ${LOG_FILE}                                    ║
@@ -1891,9 +1697,7 @@ disable_unnecessary_services() {
         if systemctl is-active --quiet "$svc" 2>/dev/null || \
            systemctl is-enabled --quiet "$svc" 2>/dev/null; then
             systemctl disable --now "$svc" 2>/dev/null || true
-            # CIS 建议使用 mask 防止服务被意外重新启用
-            systemctl mask "$svc" 2>/dev/null || true
-            info "  已禁用并遮蔽: $svc"
+            info "  已禁用: $svc"
             disabled_count=$((disabled_count + 1))
         fi
     done
@@ -1960,55 +1764,6 @@ configure_ssh_hardening() {
 # CIS 5.2.4 - 禁用 X11 转发（DNS 服务器不需要图形转发）
 X11Forwarding no
 
-# CIS 5.2.3 - SSH 日志级别（VERBOSE 记录详细认证事件，满足 PCI-DSS 审计要求）
-LogLevel VERBOSE
-EOF
-
-    # 检查系统中是否存在已配置的 SSH 公钥（防止禁用密码认证后无法登录）
-    local has_ssh_keys=false
-    local check_users=()
-    # 收集可能需要 SSH 登录的用户（UID >= 1000 或 root）
-    while IFS=: read -r username _ uid _ _ home _; do
-        if [[ "$uid" -ge 1000 || "$username" == "root" ]] && [[ -d "$home" ]]; then
-            check_users+=("$username:$home")
-        fi
-    done < /etc/passwd
-    for user_info in "${check_users[@]}"; do
-        local home="${user_info#*:}"
-        if [[ -f "$home/.ssh/authorized_keys" ]] && [[ -s "$home/.ssh/authorized_keys" ]]; then
-            has_ssh_keys=true
-            break
-        fi
-    done
-
-    # 根据 SSH 密钥检测结果决定是否禁用密码认证
-    if [[ "$has_ssh_keys" == "true" ]]; then
-        cat >> /etc/ssh/sshd_config.d/99-cis-hardening.conf <<'EOF'
-
-# CIS 5.2.16 - 强制使用公钥认证
-PubkeyAuthentication yes
-
-# CIS 5.2.10 / PCI-DSS - 禁用密码认证（强制使用 SSH 密钥登录）
-# 已检测到系统中存在 SSH 授权密钥，安全启用此选项
-PasswordAuthentication no
-EOF
-        info "检测到 SSH 授权密钥，已禁用密码认证（CIS 5.2.10）。"
-    else
-        cat >> /etc/ssh/sshd_config.d/99-cis-hardening.conf <<'EOF'
-
-# CIS 5.2.16 - 强制使用公钥认证
-PubkeyAuthentication yes
-
-# CIS 5.2.10 / PCI-DSS - 密码认证保持开启（未检测到 SSH 授权密钥）
-# 警告: 为满足 CIS/PCI-DSS 合规要求，建议尽快配置 SSH 密钥并设置为 no
-PasswordAuthentication yes
-EOF
-        warn "未检测到 SSH 授权密钥，密码认证保持开启。"
-        warn "建议: 配置 SSH 密钥后手动设置 PasswordAuthentication no 以满足 CIS/PCI-DSS 要求。"
-    fi
-
-    cat >> /etc/ssh/sshd_config.d/99-cis-hardening.conf <<'EOF'
-
 # CIS 5.2.5 - 限制最大认证尝试次数
 MaxAuthTries 4
 
@@ -2038,7 +1793,6 @@ Banner /etc/issue.net
 Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
 KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
-HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com,rsa-sha2-512,rsa-sha2-256,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com
 
 # CIS 5.2.15 - 禁用 TCP 转发（DNS 服务器不需要 SSH 隧道）
 AllowTcpForwarding no
@@ -2109,26 +1863,23 @@ main() {
         info "将要执行以下步骤:"
         info "  1.  安装前环境检查（root 权限、系统版本、内存、网络）"
         info "  2.  备份现有配置文件"
-        info "  3.  安装必需的软件包（unbound, fail2ban, auditd, unattended-upgrades 等）"
-        info "  4.  配置时间同步（CIS 2.2.1 / PCI-DSS Req 10.6）"
-        info "  5.  应用 DNS 性能调优和 CIS 内核安全加固"
-        info "  6.  创建 Unbound 用户和目录结构"
-        info "  7.  配置 DNSSEC 信任锚和根提示文件"
-        info "  8.  生成 Unbound 主配置文件（仅 DNS 端口 53，清理旧配置）"
-        info "  9.  配置域名黑名单/RPZ"
-        info "  10. 配置 UFW 防火墙规则"
-        info "  11. 配置 Fail2Ban DNS 滥用防护"
-        info "  12. 配置日志轮转（365 天保留，PCI-DSS v4.0 合规）"
-        info "  13. 应用 Systemd 服务安全加固"
-        info "  14. 创建监控和健康检查脚本及 systemd 定时器"
-        info "  15. 禁用并遮蔽不必要的服务（CIS 基准）"
-        info "  16. 配置登录横幅"
-        info "  17. 应用 SSH 安全加固（CIS 基准 5.2，含密钥认证强制）"
-        info "  18. 配置系统审计（PCI-DSS Req 10.2，auditd）"
-        info "  19. 配置自动安全更新（PCI-DSS Req 6.3.3）"
-        info "  20. 验证配置文件语法"
-        info "  21. 启动 Unbound 服务"
-        info "  22. 运行安装后验证测试"
+        info "  3.  安装必需的软件包（unbound, fail2ban 等）"
+        info "  4.  应用 DNS 性能调优和 CIS 内核安全加固"
+        info "  5.  创建 Unbound 用户和目录结构"
+        info "  6.  配置 DNSSEC 信任锚和根提示文件"
+        info "  7.  生成 Unbound 主配置文件（仅 DNS 端口 53，清理旧配置）"
+        info "  8.  配置域名黑名单/RPZ"
+        info "  9.  配置 UFW 防火墙规则"
+        info "  10. 配置 Fail2Ban DNS 滥用防护"
+        info "  11. 配置日志轮转（365 天保留，PCI-DSS v4.0 合规）"
+        info "  12. 应用 Systemd 服务安全加固"
+        info "  13. 创建监控和健康检查脚本及 systemd 定时器"
+        info "  14. 禁用不必要的服务（CIS 基准）"
+        info "  15. 配置登录横幅"
+        info "  16. 应用 SSH 安全加固（CIS 基准 5.2）"
+        info "  17. 验证配置文件语法"
+        info "  18. 启动 Unbound 服务"
+        info "  19. 运行安装后验证测试"
         info ""
         info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
@@ -2143,7 +1894,6 @@ main() {
     preflight_checks
     backup_existing
     install_packages
-    configure_time_sync
     tune_system_for_dns
     setup_unbound_dirs
     setup_dnssec
@@ -2157,8 +1907,6 @@ main() {
     disable_unnecessary_services
     configure_login_banners
     configure_ssh_hardening
-    configure_auditd
-    configure_auto_updates
     validate_config
     start_unbound
     post_install_validation
