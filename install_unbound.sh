@@ -1203,6 +1203,9 @@ configure_auditd() {
 -w /etc/sudoers.d/ -p wa -k sudo-config
 
 ## --- 使规则不可变（需要重启才能更改审计规则）---
+## 重要: 此选项设置后，任何审计规则变更都需要系统重启才能生效。
+## 这是 PCI-DSS 安全最佳实践，防止攻击者在入侵后篡改审计规则。
+## 如需紧急修改审计规则，必须先重启系统。
 -e 2
 EOF
     chmod 0640 /etc/audit/rules.d/99-pci-dss.rules
@@ -1248,6 +1251,8 @@ Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 
 // 如果需要重启，自动重启（凌晨 3:00）
+// 注意: 管理员应根据服务可用性要求和维护窗口调整此时间
+// 公共 DNS 服务器建议在低流量时段执行自动重启
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "03:00";
 
@@ -1955,6 +1960,52 @@ X11Forwarding no
 
 # CIS 5.2.3 - SSH 日志级别（VERBOSE 记录详细认证事件，满足 PCI-DSS 审计要求）
 LogLevel VERBOSE
+EOF
+
+    # 检查系统中是否存在已配置的 SSH 公钥（防止禁用密码认证后无法登录）
+    local has_ssh_keys=false
+    local check_users=()
+    # 收集可能需要 SSH 登录的用户（UID >= 1000 或 root）
+    while IFS=: read -r username _ uid _ _ home _; do
+        if [[ "$uid" -ge 1000 || "$username" == "root" ]] && [[ -d "$home" ]]; then
+            check_users+=("$username:$home")
+        fi
+    done < /etc/passwd
+    for user_info in "${check_users[@]}"; do
+        local home="${user_info#*:}"
+        if [[ -f "$home/.ssh/authorized_keys" ]] && [[ -s "$home/.ssh/authorized_keys" ]]; then
+            has_ssh_keys=true
+            break
+        fi
+    done
+
+    # 根据 SSH 密钥检测结果决定是否禁用密码认证
+    if [[ "$has_ssh_keys" == "true" ]]; then
+        cat >> /etc/ssh/sshd_config.d/99-cis-hardening.conf <<'EOF'
+
+# CIS 5.2.16 - 强制使用公钥认证
+PubkeyAuthentication yes
+
+# CIS 5.2.10 / PCI-DSS - 禁用密码认证（强制使用 SSH 密钥登录）
+# 已检测到系统中存在 SSH 授权密钥，安全启用此选项
+PasswordAuthentication no
+EOF
+        info "检测到 SSH 授权密钥，已禁用密码认证（CIS 5.2.10）。"
+    else
+        cat >> /etc/ssh/sshd_config.d/99-cis-hardening.conf <<'EOF'
+
+# CIS 5.2.16 - 强制使用公钥认证
+PubkeyAuthentication yes
+
+# CIS 5.2.10 / PCI-DSS - 密码认证保持开启（未检测到 SSH 授权密钥）
+# 警告: 为满足 CIS/PCI-DSS 合规要求，建议尽快配置 SSH 密钥并设置为 no
+PasswordAuthentication yes
+EOF
+        warn "未检测到 SSH 授权密钥，密码认证保持开启。"
+        warn "建议: 配置 SSH 密钥后手动设置 PasswordAuthentication no 以满足 CIS/PCI-DSS 要求。"
+    fi
+
+    cat >> /etc/ssh/sshd_config.d/99-cis-hardening.conf <<'EOF'
 
 # CIS 5.2.5 - 限制最大认证尝试次数
 MaxAuthTries 4
@@ -1992,13 +2043,6 @@ AllowTcpForwarding no
 
 # 禁用 SSH Agent 转发
 AllowAgentForwarding no
-
-# CIS 5.2.16 - 强制使用公钥认证
-PubkeyAuthentication yes
-
-# CIS 5.2.10 / PCI-DSS - 禁用密码认证（强制使用 SSH 密钥登录）
-# 注意: 在启用此选项前，请确保已配置好 SSH 密钥
-PasswordAuthentication no
 
 # 最大并发会话数
 MaxSessions 10
