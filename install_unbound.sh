@@ -44,6 +44,10 @@ readonly UNBOUND_LOG_DIR="/var/log/unbound"
 # 网络端口默认值（仅 DNS 端口 53，DOT/DoH 由 NGINX 处理）
 readonly DNS_PORT=53
 
+# 信号退出码常量
+readonly EXIT_SIGINT=130
+readonly EXIT_SIGTERM=143
+
 # 性能调优参数 (适配 Standard_B2ats_v2: 2 vCPU, 1 GiB 内存)
 readonly NUM_THREADS=2
 readonly MSG_CACHE_SIZE="32m"
@@ -103,6 +107,11 @@ debug() { log "DEBUG" "$@"; }
 # 错误处理和清理
 # 当脚本因错误终止时，确保系统 DNS 可用并记录失败信息。
 ###############################################################################
+# 用于跟踪触发清理的信号类型
+_CAUGHT_SIGNAL=""
+_trap_int()  { _CAUGHT_SIGNAL="INT";  cleanup_on_error "${BASH_LINENO[0]:-unknown}"; }
+_trap_term() { _CAUGHT_SIGNAL="TERM"; cleanup_on_error "${BASH_LINENO[0]:-unknown}"; }
+
 cleanup_on_error() {
     local exit_code=$?
     # 立即禁用所有陷阱，防止清理函数内部命令失败导致递归调用
@@ -126,7 +135,13 @@ DNSEOF
     fi
 
     error "请检查日志文件并手动排查问题。"
-    # 确保脚本在信号（INT/TERM）或错误（ERR）后正确退出
+    # 根据信号类型设置正确的退出码
+    if [[ "$_CAUGHT_SIGNAL" == "INT" ]]; then
+        exit $EXIT_SIGINT
+    elif [[ "$_CAUGHT_SIGNAL" == "TERM" ]]; then
+        exit $EXIT_SIGTERM
+    fi
+    # ERR 陷阱：使用实际失败命令的退出码，保证非零
     exit "${exit_code:-1}"
 }
 
@@ -207,6 +222,14 @@ preflight_checks() {
     info "可用内存: ${mem_total_mb} MB"
     if [[ $mem_total_mb -lt 512 ]]; then
         warn "检测到内存不足（${mem_total_mb} MB）。缓存大小已配置为保守值。"
+    fi
+
+    # 检查可用磁盘空间（至少需要 500 MB 用于软件包安装和日志）
+    local avail_disk_mb
+    avail_disk_mb=$(df -Pm / | awk 'NR>1 {print $4; exit}')
+    info "根分区可用磁盘空间: ${avail_disk_mb} MB"
+    if [[ ${avail_disk_mb} -lt 500 ]]; then
+        fatal "根分区磁盘空间不足（${avail_disk_mb} MB < 500 MB）。请释放磁盘空间后重试。"
     fi
 
     # 检查 CPU 数量
@@ -302,7 +325,7 @@ install_packages() {
         e2fsprogs
     )
 
-    apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" "${packages[@]}"
+    apt-get install -y -qq --no-install-recommends -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" "${packages[@]}"
 
     # 清理 APT 缓存以释放磁盘空间（对 1 GiB 内存环境尤为重要）
     apt-get clean
@@ -1096,10 +1119,10 @@ systemctl is-active --quiet unbound 2>/dev/null
 check "Unbound 服务运行状态" "$?"
 
 # 检查 2: 端口 53 是否监听
-ss -ulnp | grep -qE ':53\b' 2>/dev/null
+ss -ulnp | grep -qE ':53([^0-9]|$)' 2>/dev/null
 check "端口 53 (UDP) 监听状态" "$?"
 
-ss -tlnp | grep -qE ':53\b' 2>/dev/null
+ss -tlnp | grep -qE ':53([^0-9]|$)' 2>/dev/null
 check "端口 53 (TCP) 监听状态" "$?"
 
 # 检查 3: DNS 解析是否正常
@@ -1301,7 +1324,8 @@ validate_config() {
 # 检查端口 53 是否被占用
 ###############################################################################
 is_port53_in_use() {
-    ss -tlnp 2>/dev/null | grep -qE ':53\b' || ss -ulnp 2>/dev/null | grep -qE ':53\b'
+    # 使用 [^0-9] 确保精确匹配端口 53（不匹配 530/5353 等）
+    ss -tlnp 2>/dev/null | grep -qE ':53([^0-9]|$)' || ss -ulnp 2>/dev/null | grep -qE ':53([^0-9]|$)'
 }
 
 ###############################################################################
@@ -1351,15 +1375,19 @@ start_unbound() {
     if systemctl is-active --quiet unbound; then
         info "Unbound 正在运行。"
         # Unbound 启动成功后才更新 resolv.conf
-        # 先移除不可变属性（如果存在）
+        # 使用原子写入：先写入临时文件再 mv（防止短暂无 DNS 的窗口期）
         chattr -i /etc/resolv.conf 2>/dev/null || true
-        rm -f /etc/resolv.conf
-        cat > /etc/resolv.conf <<'EOF'
+        local resolv_tmp
+        resolv_tmp="$(mktemp /etc/resolv.conf.XXXXXX)"
+        # 先设置权限再写入内容（避免临时窗口期的权限问题）
+        chmod 644 "$resolv_tmp"
+        cat > "$resolv_tmp" <<'EOF'
 # 由 Unbound DNS 安装脚本管理
 nameserver 127.0.0.1
 nameserver ::1
 options edns0 trust-ad
 EOF
+        mv -f "$resolv_tmp" /etc/resolv.conf
         # 设置不可变属性防止 DHCP 或 networkd 覆盖
         chattr +i /etc/resolv.conf 2>/dev/null || true
         info "已更新 resolv.conf 指向本地 DNS（已设置不可变属性）"
@@ -1414,7 +1442,7 @@ post_install_validation() {
     fi
 
     # 测试 4: 端口监听状态
-    if ss -tlnp | grep -qE ":53\b"; then
+    if ss -tlnp | grep -qE ":53([^0-9]|$)"; then
         printf '%b[通过]%b TCP 端口 53 正在监听\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
@@ -1422,7 +1450,7 @@ post_install_validation() {
         fail=$((fail + 1))
     fi
 
-    if ss -ulnp | grep -qE ":53\b"; then
+    if ss -ulnp | grep -qE ":53([^0-9]|$)"; then
         printf '%b[通过]%b UDP 端口 53 正在监听\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
@@ -1625,9 +1653,11 @@ main() {
 
     # 注册错误处理陷阱（在参数解析之后，确保 BACKUP_DIR 等变量可用）
     # ERR: 命令失败时触发清理
-    # INT: 用户按 Ctrl+C 中断时触发清理
-    # TERM: 收到终止信号时触发清理
-    trap 'cleanup_on_error $LINENO' ERR INT TERM
+    # INT: 用户按 Ctrl+C 中断时触发清理（通过 _trap_int 记录信号类型）
+    # TERM: 收到终止信号时触发清理（通过 _trap_term 记录信号类型）
+    trap 'cleanup_on_error $LINENO' ERR
+    trap '_trap_int' INT
+    trap '_trap_term' TERM
 
     echo ""
     info "╔══════════════════════════════════════════════════════════════╗"
