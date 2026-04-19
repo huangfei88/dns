@@ -278,6 +278,10 @@ install_packages() {
 
     apt-get install -y -qq "${packages[@]}"
 
+    # 清理 APT 缓存以释放磁盘空间（对 1 GiB 内存环境尤为重要）
+    apt-get clean
+    apt-get autoremove -y -qq 2>/dev/null || true
+
     info "所有软件包安装完成。"
 }
 
@@ -437,6 +441,11 @@ setup_unbound_dirs() {
     chmod 750 "$UNBOUND_LOG_DIR"
     chown -R unbound:unbound /var/lib/unbound
     chmod 750 /var/lib/unbound
+
+    # 预先创建日志文件（确保 Fail2Ban 启动时日志文件已存在）
+    touch "${UNBOUND_LOG_DIR}/unbound.log"
+    chown unbound:unbound "${UNBOUND_LOG_DIR}/unbound.log"
+    chmod 640 "${UNBOUND_LOG_DIR}/unbound.log"
 
     info "目录配置完成。"
 }
@@ -607,6 +616,7 @@ server:
     harden-algo-downgrade: yes
     harden-large-queries: yes
     harden-short-bufsize: yes
+    harden-unknown-additional: yes
 
     # 使用 0x20 编码的随机位来防止欺骗
     use-caps-for-id: yes
@@ -799,6 +809,7 @@ port     = 53
 protocol = udp,tcp
 filter   = unbound-dns-abuse
 logpath  = /var/log/unbound/unbound.log
+backend  = auto
 maxretry = 50
 findtime = 60
 bantime  = 3600
@@ -1168,6 +1179,13 @@ validate_config() {
 }
 
 ###############################################################################
+# 检查端口 53 是否被占用
+###############################################################################
+is_port53_in_use() {
+    ss -tlnp 2>/dev/null | grep -q ':53 ' || ss -ulnp 2>/dev/null | grep -q ':53 '
+}
+
+###############################################################################
 # 启动并启用 Unbound
 ###############################################################################
 start_unbound() {
@@ -1179,6 +1197,23 @@ start_unbound() {
     if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
         systemctl disable --now systemd-resolved
         info "已禁用 systemd-resolved（端口 53 冲突）"
+    fi
+
+    # 检查是否有其他服务占用端口 53（BIND9、dnsmasq 等）
+    if is_port53_in_use; then
+        warn "检测到端口 53 被其他服务占用，正在尝试释放..."
+        local dns_services=(named bind9 dnsmasq)
+        for svc in "${dns_services[@]}"; do
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                systemctl disable --now "$svc" 2>/dev/null || true
+                info "已停止并禁用冲突服务: $svc"
+            fi
+        done
+        # 等待端口释放
+        sleep 2
+        if is_port53_in_use; then
+            fatal "端口 53 仍被占用，无法启动 Unbound。请手动检查: ss -tlnp | grep ':53 '"
+        fi
     fi
 
     # 立即启动 Unbound 以最小化 DNS 不可用窗口
@@ -1441,6 +1476,9 @@ X11Forwarding no
 # 禁用远程 TCP 转发，允许本地转发用于管理
 AllowTcpForwarding local
 
+# 登录前警告横幅（CIS 5.2.18）
+Banner /etc/issue.net
+
 # 使用强加密算法
 Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
@@ -1454,6 +1492,44 @@ EOF
     else
         warn "SSH 配置验证失败，已回滚更改。"
         rm -f "${sshd_config_dir}/99-cis-hardening.conf"
+    fi
+}
+
+###############################################################################
+# CIS 基准 - 禁用不必要的服务
+###############################################################################
+disable_unnecessary_services() {
+    info "正在检查并禁用不必要的服务（CIS 基准 2.1 / 2.2）..."
+
+    local services=(
+        avahi-daemon        # mDNS/DNS-SD - DNS 服务器不需要
+        cups                # 打印服务
+        isc-dhcp-server     # DHCP 服务器
+        slapd               # LDAP 服务器
+        nfs-server          # NFS 文件共享
+        rpcbind             # RPC 端口映射
+        rsync               # 远程同步服务
+        vsftpd              # FTP 服务器
+        apache2             # Web 服务器
+        squid               # 代理服务器
+        snmpd               # SNMP 监控
+        telnet.socket       # Telnet（不安全协议）
+    )
+
+    local disabled_count=0
+    for svc in "${services[@]}"; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null || \
+           systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+            systemctl disable --now "$svc" 2>/dev/null || true
+            info "  已禁用: $svc"
+            disabled_count=$((disabled_count + 1))
+        fi
+    done
+
+    if [[ $disabled_count -eq 0 ]]; then
+        info "未检测到需要禁用的不必要服务。"
+    else
+        info "已禁用 ${disabled_count} 个不必要的服务。"
     fi
 }
 
@@ -1534,10 +1610,11 @@ main() {
         info "  12. 应用 Systemd 服务安全加固"
         info "  13. 创建监控和健康检查脚本及 systemd 定时器"
         info "  14. SSH 安全加固（CIS 基准）"
-        info "  15. 配置登录横幅"
-        info "  16. 验证配置文件语法"
-        info "  17. 启动 Unbound 服务"
-        info "  18. 运行安装后验证测试"
+        info "  15. 禁用不必要的服务（CIS 基准）"
+        info "  16. 配置登录横幅"
+        info "  17. 验证配置文件语法"
+        info "  18. 启动 Unbound 服务"
+        info "  19. 运行安装后验证测试"
         info ""
         info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
@@ -1558,6 +1635,7 @@ main() {
     harden_systemd_service
     create_monitoring_scripts
     harden_ssh
+    disable_unnecessary_services
     configure_login_banners
     validate_config
     start_unbound
