@@ -1073,6 +1073,8 @@ configure_logrotate() {
 
     cat > /etc/logrotate.d/unbound <<'EOF'
 /var/log/unbound/unbound.log {
+    # Debian 13: 当日志目录属于非 root 用户时需要 su 指令，
+    # 避免 logrotate 因目录权限不安全而跳过轮转
     su unbound unbound
     daily
     rotate 365
@@ -1120,7 +1122,7 @@ EOF
 
         systemctl restart systemd-timesyncd 2>/dev/null || true
 
-        if timedatectl show --property=NTPSynchronized --value 2>/dev/null | grep -q "yes"; then
+        if timedatectl show --property=NTPSynchronized --value 2>/dev/null | grep -qi "yes"; then
             info "NTP 时间同步已激活并同步。"
         else
             warn "NTP 时间同步已配置但尚未完成同步（可能需要几秒钟）。"
