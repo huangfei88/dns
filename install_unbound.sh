@@ -30,7 +30,7 @@ umask 0027
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.7.0"
+readonly SCRIPT_VERSION="1.8.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -330,7 +330,9 @@ install_packages() {
         fail2ban
         logrotate
         rsyslog
-        net-tools
+        iproute2
+        auditd
+        audispd-plugins
         sudo
         e2fsprogs
     )
@@ -378,7 +380,7 @@ net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_max_orphans = 65536
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_timestamps = 0
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_no_metrics_save = 1
 
@@ -610,7 +612,7 @@ setup_dnssec() {
         cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
     fi
     chown unbound:unbound "$root_hints"
-    chmod 644 "$root_hints"
+    chmod 640 "$root_hints"
 
     # 初始化/更新根信任锚
     # unbound-anchor 退出码: 0=无需更新, 1=已更新, >1=失败
@@ -623,7 +625,7 @@ setup_dnssec() {
         warn "unbound-anchor 执行异常 (退出码: ${anchor_exit})，请检查信任锚文件。"
     fi
     chown unbound:unbound "$anchor_file"
-    chmod 644 "$anchor_file"
+    chmod 640 "$anchor_file"
 
     info "DNSSEC 信任锚配置完成。"
 }
@@ -970,10 +972,94 @@ server:
     local-zone: "254.169.in-addr.arpa." refuse
     local-zone: "2.0.192.in-addr.arpa." refuse
     local-zone: "0.0.192.in-addr.arpa." refuse
+    # 192.88.99.0/24 (deprecated 6to4 relay anycast)
+    local-zone: "99.88.192.in-addr.arpa." refuse
     local-zone: "100.51.198.in-addr.arpa." refuse
     local-zone: "113.0.203.in-addr.arpa." refuse
     local-zone: "18.198.in-addr.arpa." refuse
     local-zone: "19.198.in-addr.arpa." refuse
+    # 100.64.0.0/10 (CGNAT RFC 6598) — 100.64–100.127
+    local-zone: "64.100.in-addr.arpa." refuse
+    local-zone: "65.100.in-addr.arpa." refuse
+    local-zone: "66.100.in-addr.arpa." refuse
+    local-zone: "67.100.in-addr.arpa." refuse
+    local-zone: "68.100.in-addr.arpa." refuse
+    local-zone: "69.100.in-addr.arpa." refuse
+    local-zone: "70.100.in-addr.arpa." refuse
+    local-zone: "71.100.in-addr.arpa." refuse
+    local-zone: "72.100.in-addr.arpa." refuse
+    local-zone: "73.100.in-addr.arpa." refuse
+    local-zone: "74.100.in-addr.arpa." refuse
+    local-zone: "75.100.in-addr.arpa." refuse
+    local-zone: "76.100.in-addr.arpa." refuse
+    local-zone: "77.100.in-addr.arpa." refuse
+    local-zone: "78.100.in-addr.arpa." refuse
+    local-zone: "79.100.in-addr.arpa." refuse
+    local-zone: "80.100.in-addr.arpa." refuse
+    local-zone: "81.100.in-addr.arpa." refuse
+    local-zone: "82.100.in-addr.arpa." refuse
+    local-zone: "83.100.in-addr.arpa." refuse
+    local-zone: "84.100.in-addr.arpa." refuse
+    local-zone: "85.100.in-addr.arpa." refuse
+    local-zone: "86.100.in-addr.arpa." refuse
+    local-zone: "87.100.in-addr.arpa." refuse
+    local-zone: "88.100.in-addr.arpa." refuse
+    local-zone: "89.100.in-addr.arpa." refuse
+    local-zone: "90.100.in-addr.arpa." refuse
+    local-zone: "91.100.in-addr.arpa." refuse
+    local-zone: "92.100.in-addr.arpa." refuse
+    local-zone: "93.100.in-addr.arpa." refuse
+    local-zone: "94.100.in-addr.arpa." refuse
+    local-zone: "95.100.in-addr.arpa." refuse
+    local-zone: "96.100.in-addr.arpa." refuse
+    local-zone: "97.100.in-addr.arpa." refuse
+    local-zone: "98.100.in-addr.arpa." refuse
+    local-zone: "99.100.in-addr.arpa." refuse
+    local-zone: "100.100.in-addr.arpa." refuse
+    local-zone: "101.100.in-addr.arpa." refuse
+    local-zone: "102.100.in-addr.arpa." refuse
+    local-zone: "103.100.in-addr.arpa." refuse
+    local-zone: "104.100.in-addr.arpa." refuse
+    local-zone: "105.100.in-addr.arpa." refuse
+    local-zone: "106.100.in-addr.arpa." refuse
+    local-zone: "107.100.in-addr.arpa." refuse
+    local-zone: "108.100.in-addr.arpa." refuse
+    local-zone: "109.100.in-addr.arpa." refuse
+    local-zone: "110.100.in-addr.arpa." refuse
+    local-zone: "111.100.in-addr.arpa." refuse
+    local-zone: "112.100.in-addr.arpa." refuse
+    local-zone: "113.100.in-addr.arpa." refuse
+    local-zone: "114.100.in-addr.arpa." refuse
+    local-zone: "115.100.in-addr.arpa." refuse
+    local-zone: "116.100.in-addr.arpa." refuse
+    local-zone: "117.100.in-addr.arpa." refuse
+    local-zone: "118.100.in-addr.arpa." refuse
+    local-zone: "119.100.in-addr.arpa." refuse
+    local-zone: "120.100.in-addr.arpa." refuse
+    local-zone: "121.100.in-addr.arpa." refuse
+    local-zone: "122.100.in-addr.arpa." refuse
+    local-zone: "123.100.in-addr.arpa." refuse
+    local-zone: "124.100.in-addr.arpa." refuse
+    local-zone: "125.100.in-addr.arpa." refuse
+    local-zone: "126.100.in-addr.arpa." refuse
+    local-zone: "127.100.in-addr.arpa." refuse
+    # 240.0.0.0/4 (CLASS E / reserved, includes 255.255.255.255 broadcast)
+    local-zone: "240.in-addr.arpa." refuse
+    local-zone: "241.in-addr.arpa." refuse
+    local-zone: "242.in-addr.arpa." refuse
+    local-zone: "243.in-addr.arpa." refuse
+    local-zone: "244.in-addr.arpa." refuse
+    local-zone: "245.in-addr.arpa." refuse
+    local-zone: "246.in-addr.arpa." refuse
+    local-zone: "247.in-addr.arpa." refuse
+    local-zone: "248.in-addr.arpa." refuse
+    local-zone: "249.in-addr.arpa." refuse
+    local-zone: "250.in-addr.arpa." refuse
+    local-zone: "251.in-addr.arpa." refuse
+    local-zone: "252.in-addr.arpa." refuse
+    local-zone: "253.in-addr.arpa." refuse
+    local-zone: "254.in-addr.arpa." refuse
+    local-zone: "255.in-addr.arpa." refuse
     local-zone: "8.b.d.0.1.0.0.2.ip6.arpa." refuse
     local-zone: "c.f.ip6.arpa." refuse
     local-zone: "d.f.ip6.arpa." refuse
@@ -1106,8 +1192,168 @@ EOF
 }
 
 ###############################################################################
-# Systemd 服务安全加固
+# CIS 基准 §4 / PCI-DSS Req 10 — 内核审计（auditd）配置
 ###############################################################################
+configure_auditd() {
+    info "正在配置 auditd 内核审计（CIS §4 / PCI-DSS Req 10）..."
+
+    # --- auditd 主配置 ---
+    cat > /etc/audit/auditd.conf <<'EOF'
+# =============================================================================
+# auditd 主配置 — CIS 基准 §4 / PCI-DSS v4.0 Req 10
+# =============================================================================
+log_file = /var/log/audit/audit.log
+log_format = ENRICHED
+log_group = adm
+priority_boost = 4
+flush = INCREMENTAL_ASYNC
+freq = 50
+# PCI-DSS Req 10.7.1: 至少保留 12 个月的审计日志
+num_logs = 13
+max_log_file = 100
+# CIS 4.1.1.3: 日志满时保留旧日志（不允许覆盖）
+max_log_file_action = KEEP_LOGS
+# CIS 4.1.1.4: 空间不足时让系统进入单用户模式（防止日志丢失）
+space_left = 100
+space_left_action = SYSLOG
+admin_space_left = 50
+admin_space_left_action = HALT
+disk_full_action = HALT
+disk_error_action = HALT
+tcp_listen_queue = 5
+tcp_max_per_addr = 1
+tcp_client_max_idle = 0
+enable_krb5 = no
+krb5_principal = auditd
+distribute_network = no
+EOF
+    chmod 0640 /etc/audit/auditd.conf
+    chown root:root /etc/audit/auditd.conf
+
+    # --- CIS §4 / PCI-DSS Req 10 审计规则 ---
+    cat > /etc/audit/rules.d/99-pci-dss-cis.rules <<'EOF'
+# =============================================================================
+# auditd 审计规则 — CIS 基准 §4 / PCI-DSS v4.0 Req 10
+# 覆盖: 特权操作、认证、文件访问、网络变更、系统管理
+# =============================================================================
+
+# 删除全部现有规则，以干净状态开始
+-D
+
+# 设置缓冲区大小（高流量服务器推荐 8192）
+-b 8192
+
+# 规则不匹配时的失败动作: 1=打印警告 2=内核 panic（生产选1）
+-f 1
+
+# === PCI-DSS Req 10.2 / CIS 4.1.3.1: 日期和时间变更 ===
+-a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
+-a always,exit -F arch=b64 -S clock_settime -k time-change
+-w /etc/localtime -p wa -k time-change
+
+# === CIS 4.1.3.7: 用户和组信息变更 ===
+-w /etc/group -p wa -k identity
+-w /etc/passwd -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+
+# === CIS 4.1.3.4: 网络环境变更 ===
+-a always,exit -F arch=b64 -S sethostname -S setdomainname -k system-locale
+-w /etc/issue -p wa -k system-locale
+-w /etc/issue.net -p wa -k system-locale
+-w /etc/hosts -p wa -k system-locale
+-w /etc/network -p wa -k system-locale
+
+# === CIS 4.1.3.1: 系统管理作用域变更（sudoers）===
+-w /etc/sudoers -p wa -k scope
+-w /etc/sudoers.d/ -p wa -k scope
+
+# === PCI-DSS Req 10.2.5 / CIS 4.1.3.2: sudo/su 使用 ===
+-w /var/log/sudo.log -p wa -k actions
+-a always,exit -F arch=b64 -C euid!=uid -F euid=0 -Fauid>=1000 -F auid!=4294967295 -S execve -k user_emulation
+
+# === PCI-DSS Req 10.2.2 / CIS 4.1.3.10: 特权命令执行 ===
+-a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/su -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/sbin/useradd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/sbin/usermod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/sbin/userdel -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/sbin/groupadd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/sbin/groupmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/sbin/insmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/sbin/rmmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/sbin/modprobe -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/chown -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/chmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/chsh -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/newgrp -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/gpasswd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/usr/bin/chage -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+-a always,exit -F path=/sbin/unix_chkpwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
+
+# === CIS 4.1.3.6: 未授权文件访问（EACCES / EPERM）===
+-a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=4294967295 -k access
+-a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=4294967295 -k access
+
+# === CIS 4.1.3.8: 文件系统挂载 ===
+-a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=4294967295 -k mounts
+
+# === CIS 4.1.3.9: 文件删除 ===
+-a always,exit -F arch=b64 -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k delete
+
+# === PCI-DSS Req 10.2.3 / CIS 4.1.3.11: 审计日志访问 ===
+-w /var/log/audit/ -p wa -k audit-log-access
+-w /etc/audit/ -p wa -k audit-config
+-w /etc/audit/rules.d/ -p wa -k audit-config
+
+# === PCI-DSS Req 10.2.6: 审计工具执行 ===
+-w /sbin/auditctl -p x -k audit-tools
+-w /sbin/auditd -p x -k audit-tools
+-w /sbin/ausearch -p x -k audit-tools
+-w /sbin/aureport -p x -k audit-tools
+-w /sbin/autrace -p x -k audit-tools
+
+# === PCI-DSS Req 10.2.5: 认证机制变更（PAM）===
+-w /etc/pam.d/ -p wa -k pam
+-w /etc/security/limits.conf -p wa -k pam
+-w /etc/security/limits.d/ -p wa -k pam
+
+# === SSH 配置变更监控（PCI-DSS Req 10.2）===
+-w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+
+# === Unbound DNS 配置变更监控 ===
+-w /etc/unbound/ -p wa -k unbound-config
+-w /var/lib/unbound/root.key -p wa -k unbound-dnssec
+
+# === 内核模块加载（CIS 4.1.3）===
+-a always,exit -F arch=b64 -S init_module -S delete_module -k modules
+
+# === 系统调用: 权能提升（CIS 4.1.3）===
+-a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -k privilege-escalation
+-a always,exit -F arch=b64 -S setresuid -S setresgid -k privilege-escalation
+
+# 将规则设为不可变（需重启才能修改）— 在所有规则末尾添加
+# 注意: 这意味着重启前无法动态调整规则，对安全加固而言这是期望行为
+-e 2
+EOF
+    chmod 0600 /etc/audit/rules.d/99-pci-dss-cis.rules
+    chown root:root /etc/audit/rules.d/99-pci-dss-cis.rules
+
+    # 确保 /var/log/audit 目录权限正确
+    mkdir -p /var/log/audit
+    chmod 0700 /var/log/audit
+    chown root:root /var/log/audit
+
+    systemctl enable auditd
+    systemctl restart auditd 2>/dev/null || warn "auditd 重启遇到问题（将在重启后启动）"
+
+    info "auditd 内核审计已配置（CIS §4 / PCI-DSS Req 10）。"
+}
+
+
 harden_systemd_service() {
     info "正在加固 Unbound systemd 服务..."
 
@@ -1176,7 +1422,7 @@ EOF
 
     # 创建 tmpfiles.d 条目确保重启后 /run/unbound 自动创建
     cat > /etc/tmpfiles.d/unbound.conf <<'EOF'
-d /run/unbound 0755 unbound unbound -
+d /run/unbound 0750 unbound unbound -
 EOF
     chmod 0644 /etc/tmpfiles.d/unbound.conf
     chown root:root /etc/tmpfiles.d/unbound.conf
@@ -1316,7 +1562,7 @@ if curl -sSf --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 5 -o "$T
     if [[ -s "$TEMP_FILE" ]] && grep -q "$ROOT_HINTS_MARKER" "$TEMP_FILE" 2>/dev/null; then
         mv "$TEMP_FILE" "$ROOT_HINTS"
         chown unbound:unbound "$ROOT_HINTS"
-        chmod 644 "$ROOT_HINTS"
+        chmod 640 "$ROOT_HINTS"
         unbound-control reload 2>/dev/null || systemctl reload unbound
         logger -t "root-hints-update" "根提示文件更新成功"
     else
@@ -1340,6 +1586,16 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/update-root-hints
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/unbound
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE
 EOF
     chmod 0644 /etc/systemd/system/update-root-hints.service
     chown root:root /etc/systemd/system/update-root-hints.service
@@ -1398,6 +1654,16 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/update-trust-anchor
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/unbound
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE
 EOF
     chmod 0644 /etc/systemd/system/update-trust-anchor.service
     chown root:root /etc/systemd/system/update-trust-anchor.service
@@ -1551,7 +1817,7 @@ post_install_validation() {
 
     # 测试 3: DNSSEC 验证
     local ad_flag
-    ad_flag=$(dig @127.0.0.1 +time=5 +tries=2 example.com A 2>&1 | grep -c "ad;" || true)
+    ad_flag=$(dig @127.0.0.1 +time=5 +tries=2 example.com A 2>&1 | grep -c " ad;" || true)
     if [[ "$ad_flag" -ge 1 ]]; then
         printf '%b[通过]%b DNSSEC 验证已启用 (AD 标志已设置)\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
@@ -1677,9 +1943,10 @@ print_summary() {
 ║    ✓ deny-any 已启用                                                        ║
 ║    ✓ DNS 性能内核调优                                                        ║
 ║    ✓ CIS 基准内核安全加固                                                    ║
-║    ✓ SSH 安全加固（CIS 基准 5.2，强加密算法）                                 ║
+║    ✓ SSH 安全加固（CIS 基准 5.2，强加密算法，禁用密码认证）                    ║
 ║    ✓ 登录横幅和核心转储限制                                                  ║
 ║    ✓ 365 天日志保留（PCI-DSS v4.0 Req 10.7.1）                              ║
+║    ✓ auditd 内核审计（CIS §4 / PCI-DSS Req 10 — 全面系统审计）              ║
 ║    ✓ 快速服务器选择优化                                                      ║
 ║                                                                            ║
 ║  备份位置: ${BACKUP_DIR}                         ║
@@ -1823,8 +2090,8 @@ AllowTcpForwarding no
 # 禁用 SSH Agent 转发
 AllowAgentForwarding no
 
-# 最大并发会话数
-MaxSessions 10
+# 最大并发会话数（CIS: ≤ 4 用于高安全环境）
+MaxSessions 4
 
 # 最大并发未认证连接数（防暴力破解）
 MaxStartups 10:30:60
@@ -1840,6 +2107,13 @@ PermitTunnel no
 
 # 使用 PAM 进行认证
 UsePAM yes
+
+# 禁用 DNS 反向查找（防止因 DNS 超时导致 SSH 登录延迟）
+UseDNS no
+
+# PCI-DSS Req 8.3 / CIS 5.2 - 禁用密码认证，强制使用密钥认证
+# 警告: 启用此选项前必须确保已配置 SSH 公钥，否则将无法登录！
+PasswordAuthentication no
 EOF
     chmod 0600 /etc/ssh/sshd_config.d/99-cis-hardening.conf
     chown root:root /etc/ssh/sshd_config.d/99-cis-hardening.conf
@@ -1848,8 +2122,11 @@ EOF
     local sshd_test_output=""
     if sshd_test_output=$(sshd -t 2>&1); then
         # 使用 reload 而非 restart，避免断开当前 SSH 会话
-        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
-        info "SSH 安全加固已应用并重载。"
+        if ! systemctl reload sshd 2>/dev/null && ! systemctl reload ssh 2>/dev/null; then
+            warn "SSH 服务重载失败，新配置将在下次重启后生效。请手动执行: systemctl reload sshd"
+        else
+            info "SSH 安全加固已应用并重载。"
+        fi
     else
         warn "SSH 配置验证失败，正在回滚以避免 SSH 服务中断..."
         warn "sshd -t 输出: ${sshd_test_output}"
@@ -1901,14 +2178,15 @@ main() {
         info "  9.  配置 UFW 防火墙规则"
         info "  10. 配置 Fail2Ban DNS 滥用防护"
         info "  11. 配置日志轮转（365 天保留，PCI-DSS v4.0 合规）"
-        info "  12. 应用 Systemd 服务安全加固"
-        info "  13. 创建监控和健康检查脚本及 systemd 定时器"
-        info "  14. 禁用不必要的服务（CIS 基准）"
-        info "  15. 配置登录横幅"
-        info "  16. 应用 SSH 安全加固（CIS 基准 5.2）"
-        info "  17. 验证配置文件语法"
-        info "  18. 启动 Unbound 服务"
-        info "  19. 运行安装后验证测试"
+        info "  12. 配置 auditd 内核审计（CIS §4 / PCI-DSS Req 10）"
+        info "  13. 应用 Systemd 服务安全加固"
+        info "  14. 创建监控和健康检查脚本及 systemd 定时器"
+        info "  15. 禁用不必要的服务（CIS 基准）"
+        info "  16. 配置登录横幅"
+        info "  17. 应用 SSH 安全加固（CIS 基准 5.2）"
+        info "  18. 验证配置文件语法"
+        info "  19. 启动 Unbound 服务"
+        info "  20. 运行安装后验证测试"
         info ""
         info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
@@ -1931,6 +2209,7 @@ main() {
     configure_firewall
     configure_fail2ban
     configure_logrotate
+    configure_auditd
     harden_systemd_service
     create_monitoring_scripts
     disable_unnecessary_services
