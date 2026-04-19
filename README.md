@@ -261,6 +261,8 @@ sudo fail2ban-client status unbound-dns-abuse
 
 3. Configure **Network Security Group (NSG)**:
 
+> ⚠️ **Security Warning**: Always restrict SSH (port 22) access to your own IP address only. Never open SSH to `Any`.
+
 | Priority | Port | Protocol | Source | Description |
 |----------|------|----------|--------|-------------|
 | 100 | 53 | UDP | Any | DNS queries |
@@ -311,16 +313,18 @@ The script will automatically:
 9. Validate configuration and start the service
 10. Run post-installation health checks
 
+> **Tip**: The installation log is saved to `/var/log/unbound-install.log`. If anything goes wrong, check this file first.
+
 ### Step 4: Verify Installation / 验证安装
 
 ```bash
-# Run the built-in health check
+# Run the built-in health check (shows all check results)
 sudo /usr/local/bin/unbound-health-check -v
 
 # Test DNS resolution from the server itself
 dig @127.0.0.1 example.com A
 
-# Test DNSSEC validation
+# Test DNSSEC validation (look for "ad" flag in the response)
 dig @127.0.0.1 +dnssec example.com A
 
 # Verify DNSSEC rejects bad signatures (should return SERVFAIL)
@@ -335,14 +339,34 @@ sudo fail2ban-client status unbound-dns-abuse
 sudo /usr/local/bin/unbound-stats
 ```
 
+**Expected results:**
+- `dig` should return an IP address for `example.com`
+- The `+dnssec` query should show `flags: ... ad;` (Authenticated Data)
+- `dnssec-failed.org` should return `SERVFAIL` (proving DNSSEC validation works)
+- All health checks should show `[通过]` (PASS)
+
 ### Step 5: Test from External Client / 从外部客户端测试
 
 ```bash
-# Replace <server-ip> with your VM's public IP
+# Replace <server-ip> with your VM's public IP address
+
+# Basic DNS query
 dig @<server-ip> example.com A
+
+# DNSSEC-enabled query
 dig @<server-ip> +dnssec google.com A
+
+# TCP query
 dig @<server-ip> +tcp example.com AAAA
+
+# Reverse DNS lookup
+dig @<server-ip> -x 8.8.8.8
+
+# Query response time benchmark
+dig @<server-ip> example.com A | grep "Query time"
 ```
+
+> If external queries fail, verify: (1) Azure NSG allows port 53 inbound, (2) UFW is not blocking traffic (`sudo ufw status verbose`), (3) Unbound is listening on all interfaces (`ss -ulnp | grep :53`).
 
 ### Step 6: (Optional) Set Up DNS-over-TLS/HTTPS / 配置 DoT/DoH
 
@@ -353,6 +377,12 @@ DNS-over-TLS (port 853) and DNS-over-HTTPS (port 443) are handled by a separatel
 3. Configure NGINX to proxy DoT (port 853) and DoH (port 443) to Unbound (port 53)
 4. Obtain TLS certificates via Let's Encrypt
 
+> The firewall already has ports 853 and 443 open in preparation for NGINX. If you do not plan to install NGINX, you can remove these rules:
+> ```bash
+> sudo ufw delete allow 853/tcp
+> sudo ufw delete allow 443/tcp
+> ```
+
 ### Step 7: Configure DNS Records / 配置 DNS 记录
 
 If you want clients to use your server by domain name, create DNS records:
@@ -362,29 +392,164 @@ If you want clients to use your server by domain name, create DNS records:
 | A | dns.example.com | `<server-ip>` | Server address |
 | AAAA | dns.example.com | `<server-ipv6>` | Server IPv6 address |
 
+### Step 8: Managing the Domain Blocklist / 管理域名黑名单
+
+Add malicious or unwanted domains to the blocklist:
+
+```bash
+# Edit the blocklist file
+sudo nano /etc/unbound/blocklist.conf
+
+# Add entries in this format (one per line):
+# local-zone: "malware-domain.com." always_refuse
+# local-zone: "tracking-site.net." always_refuse
+
+# After editing, verify the configuration syntax
+sudo unbound-checkconf
+
+# Reload Unbound to apply changes (no restart needed)
+sudo unbound-control reload
+```
+
+### Step 9: Client Configuration / 客户端配置
+
+Configure your devices to use the new DNS server:
+
+**Linux/macOS:**
+```bash
+# Temporarily test
+dig @<server-ip> example.com
+
+# Permanently set DNS (varies by distribution)
+# For systemd-resolved systems, edit /etc/systemd/resolved.conf:
+#   [Resolve]
+#   DNS=<server-ip>
+```
+
+**Windows:**
+1. Open Network & Internet Settings → Change adapter options
+2. Right-click your connection → Properties → IPv4 → Properties
+3. Set Preferred DNS server to `<server-ip>`
+
+**Android (Private DNS):**
+1. Settings → Network & Internet → Private DNS
+2. Select "Private DNS provider hostname"
+3. Enter `dns.example.com` (requires DoT via NGINX)
+
+**iOS:**
+1. Settings → Wi-Fi → tap your network → Configure DNS → Manual
+2. Add `<server-ip>` as DNS server
+
 ### Maintenance / 日常维护
 
 ```bash
-# View logs
+# View real-time logs
 sudo tail -f /var/log/unbound/unbound.log
 
 # View statistics
 sudo /usr/local/bin/unbound-stats
 
-# Flush DNS cache
+# Run health check
+sudo /usr/local/bin/unbound-health-check -v
+
+# Flush entire DNS cache
 sudo unbound-control flush_zone .
 
-# Reload configuration after changes
+# Flush a specific domain from cache
+sudo unbound-control flush example.com
+
+# Reload configuration after changes (no downtime)
 sudo unbound-control reload
 
-# Verify configuration syntax
+# Full restart (brief downtime)
+sudo systemctl restart unbound
+
+# Verify configuration syntax before reloading
 sudo unbound-checkconf
 
 # Check automatic update timers
 systemctl list-timers --all | grep -E 'root-hints|trust-anchor'
+
+# Check Fail2Ban banned IPs
+sudo fail2ban-client status unbound-dns-abuse
+
+# Unban a specific IP from Fail2Ban
+sudo fail2ban-client set unbound-dns-abuse unbanip <ip-address>
+
+# View firewall rules
+sudo ufw status numbered
 ```
 
 Root hints are updated automatically (monthly) and DNSSEC trust anchors are updated weekly via systemd timers.
+
+### Backup and Restore / 备份与恢复
+
+The installation script automatically creates a backup in `/var/backups/unbound-install-<timestamp>/` before making changes. To manually backup:
+
+```bash
+# Create a manual backup
+sudo cp -a /etc/unbound /var/backups/unbound-manual-$(date +%Y%m%d)
+sudo cp -a /etc/fail2ban/jail.d/unbound-dns.conf /var/backups/
+sudo cp -a /etc/sysctl.d/99-unbound-dns.conf /var/backups/
+```
+
+To restore from backup:
+```bash
+# Stop Unbound
+sudo systemctl stop unbound
+
+# Restore configuration (replace <timestamp> with your backup timestamp)
+sudo cp -a /var/backups/unbound-install-<timestamp>/etc_unbound/* /etc/unbound/
+
+# Verify and restart
+sudo unbound-checkconf
+sudo systemctl start unbound
+```
+
+### Uninstallation / 卸载
+
+To completely remove Unbound and all configurations:
+
+```bash
+# Stop and disable services
+sudo systemctl stop unbound
+sudo systemctl disable unbound
+sudo systemctl stop fail2ban
+
+# Remove immutable attribute from resolv.conf
+sudo chattr -i /etc/resolv.conf
+
+# Restore default DNS
+echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+
+# Remove packages
+sudo apt-get purge -y unbound unbound-anchor unbound-host
+sudo apt-get autoremove -y
+
+# Remove configuration files
+sudo rm -rf /etc/unbound
+sudo rm -rf /var/log/unbound
+sudo rm -rf /var/lib/unbound
+sudo rm -f /etc/sysctl.d/99-unbound-dns.conf
+sudo rm -f /etc/security/limits.d/99-disable-coredumps.conf
+sudo rm -f /etc/fail2ban/jail.d/unbound-dns.conf
+sudo rm -f /etc/fail2ban/filter.d/unbound-dns-abuse.conf
+sudo rm -f /etc/systemd/system/unbound.service.d/hardening.conf
+sudo rm -f /etc/systemd/system/update-root-hints.*
+sudo rm -f /etc/systemd/system/update-trust-anchor.*
+sudo rm -f /etc/tmpfiles.d/unbound.conf
+sudo rm -f /usr/local/bin/unbound-health-check
+sudo rm -f /usr/local/bin/unbound-stats
+sudo rm -f /usr/local/bin/update-root-hints
+sudo rm -f /usr/local/bin/update-trust-anchor
+sudo rm -f /etc/logrotate.d/unbound
+
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Re-apply sysctl defaults
+sudo sysctl --system
+```
 
 ## License
 
