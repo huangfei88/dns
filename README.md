@@ -31,7 +31,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 
 ### Compliance
 - **CIS Benchmark** hardening (kernel, filesystem, services, login banners, core dump restrictions)
-- **PCI-DSS** compliance (TLS 1.2+, audit logging, 90-day log retention, access control)
+- **PCI-DSS** compliance (TLS 1.2+, audit logging, 365-day log retention, access control)
 - Comprehensive audit logging
 - Login banners and access restrictions
 - Disabled unnecessary services
@@ -41,7 +41,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - Statistics collection (`/usr/local/bin/unbound-stats`)
 - Automatic root hints updates (monthly via systemd timer)
 - Automatic DNSSEC trust anchor updates (weekly via systemd timer)
-- Log rotation with 90-day retention
+- Log rotation with 365-day retention
 
 ## Requirements
 
@@ -212,7 +212,7 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 - [x] TLS 1.2+ for encrypted DNS via NGINX proxy (Requirement 4.1)
 - [x] Strong cipher suites (DNS transport)
 - [x] Comprehensive audit logging (Requirement 10)
-- [x] 90-day log retention (Requirement 10.7)
+- [x] 365-day log retention (PCI-DSS v4.0 Requirement 10.7.1)
 - [x] Firewall with default-deny policy (Requirement 1)
 - [x] System hardening (Requirement 2)
 - [x] Access control (Requirement 7)
