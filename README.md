@@ -197,11 +197,12 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 ### CIS Benchmark Controls
 - [x] Kernel hardening (IP forwarding, source routing, ICMP redirects, SYN cookies)
 - [x] Core dump restrictions
-- [x] SSH hardening (Protocol 2, MaxAuthTries, strong ciphers, no X11 forwarding)
+- [x] SSH hardening (MaxAuthTries, strong ciphers, no X11 forwarding, login banner)
 - [x] File permission hardening
-- [x] Unnecessary services disabled
-- [x] Login banners
+- [x] Unnecessary services disabled (avahi, cups, rpcbind, etc.)
+- [x] Login banners (pre-login and post-login)
 - [x] ASLR enabled
+- [x] BPF and ptrace restrictions
 
 ### PCI-DSS Requirements
 - [x] TLS 1.2+ for encrypted DNS via NGINX proxy (Requirement 4.1)
@@ -247,6 +248,145 @@ sudo ufw status verbose
 # Check Fail2Ban status
 sudo fail2ban-client status unbound-dns-abuse
 ```
+
+## Detailed Deployment Guide / 详细部署教程
+
+### Step 1: Create Azure VM / 创建 Azure 虚拟机
+
+1. Log into [Azure Portal](https://portal.azure.com)
+2. Create a new VM with these settings:
+   - **Image**: Debian 13 (Trixie) ARM64
+   - **Size**: Standard_B2ats_v2 (2 vCPU Arm64, 1 GiB RAM)
+   - **Authentication**: SSH public key (recommended) or password
+   - **Public IP**: Static (required for DNS service)
+   - **OS Disk**: 30 GB Standard SSD (P4)
+
+3. Configure **Network Security Group (NSG)**:
+
+| Priority | Port | Protocol | Source | Description |
+|----------|------|----------|--------|-------------|
+| 100 | 53 | UDP | Any | DNS queries |
+| 110 | 53 | TCP | Any | DNS queries (TCP) |
+| 120 | 853 | TCP | Any | DNS-over-TLS (for NGINX) |
+| 130 | 443 | TCP | Any | DNS-over-HTTPS (for NGINX) |
+| 140 | 22 | TCP | Your IP only | SSH management |
+
+### Step 2: Initial Server Setup / 初始服务器配置
+
+```bash
+# SSH into the server
+ssh <username>@<server-public-ip>
+
+# Update the system
+sudo apt-get update && sudo apt-get upgrade -y
+
+# Install git (if not present)
+sudo apt-get install -y git
+```
+
+### Step 3: Clone and Run / 克隆并运行
+
+```bash
+# Clone the repository
+git clone https://github.com/huangfei88/dns.git
+cd dns
+
+# Make the script executable
+chmod +x install_unbound.sh
+
+# (Optional) Preview what will be done
+sudo ./install_unbound.sh --dry-run
+
+# Run the installation
+sudo ./install_unbound.sh
+```
+
+The script will automatically:
+1. Install all required packages (Unbound, Fail2Ban, UFW, etc.)
+2. Apply kernel security hardening (CIS Benchmark + DNS performance tuning)
+3. Configure DNSSEC with automatic root trust-anchor management
+4. Set up Unbound with optimized configuration for the VM size
+5. Configure UFW firewall with default-deny policy
+6. Set up Fail2Ban for DNS abuse protection
+7. Apply systemd sandboxing and SSH hardening
+8. Create monitoring scripts and maintenance timers
+9. Validate configuration and start the service
+10. Run post-installation health checks
+
+### Step 4: Verify Installation / 验证安装
+
+```bash
+# Run the built-in health check
+sudo /usr/local/bin/unbound-health-check -v
+
+# Test DNS resolution from the server itself
+dig @127.0.0.1 example.com A
+
+# Test DNSSEC validation
+dig @127.0.0.1 +dnssec example.com A
+
+# Verify DNSSEC rejects bad signatures (should return SERVFAIL)
+dig @127.0.0.1 dnssec-failed.org A
+
+# Check service status
+sudo systemctl status unbound
+sudo ufw status verbose
+sudo fail2ban-client status unbound-dns-abuse
+
+# View statistics
+sudo /usr/local/bin/unbound-stats
+```
+
+### Step 5: Test from External Client / 从外部客户端测试
+
+```bash
+# Replace <server-ip> with your VM's public IP
+dig @<server-ip> example.com A
+dig @<server-ip> +dnssec google.com A
+dig @<server-ip> +tcp example.com AAAA
+```
+
+### Step 6: (Optional) Set Up DNS-over-TLS/HTTPS / 配置 DoT/DoH
+
+DNS-over-TLS (port 853) and DNS-over-HTTPS (port 443) are handled by a separately installed NGINX reverse proxy. Install and configure NGINX with TLS certificates after Unbound is running:
+
+1. Point a domain name (e.g., `dns.example.com`) to your server's public IP
+2. Install NGINX and certbot
+3. Configure NGINX to proxy DoT (port 853) and DoH (port 443) to Unbound (port 53)
+4. Obtain TLS certificates via Let's Encrypt
+
+### Step 7: Configure DNS Records / 配置 DNS 记录
+
+If you want clients to use your server by domain name, create DNS records:
+
+| Type | Name | Value | Purpose |
+|------|------|-------|---------|
+| A | dns.example.com | \<server-ip\> | Server address |
+| AAAA | dns.example.com | \<server-ipv6\> | Server IPv6 address |
+
+### Maintenance / 日常维护
+
+```bash
+# View logs
+sudo tail -f /var/log/unbound/unbound.log
+
+# View statistics
+sudo /usr/local/bin/unbound-stats
+
+# Flush DNS cache
+sudo unbound-control flush_zone .
+
+# Reload configuration after changes
+sudo unbound-control reload
+
+# Verify configuration syntax
+sudo unbound-checkconf
+
+# Check automatic update timers
+systemctl list-timers --all | grep -E 'root-hints|trust-anchor'
+```
+
+Root hints are updated automatically (monthly) and DNSSEC trust anchors are updated weekly via systemd timers.
 
 ## License
 
