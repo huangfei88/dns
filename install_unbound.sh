@@ -475,28 +475,39 @@ setup_unbound_dirs() {
     if command -v aa-status &>/dev/null && aa-status --enabled 2>/dev/null; then
         local apparmor_local="/etc/apparmor.d/local/usr.sbin.unbound"
         if [[ -d /etc/apparmor.d/local ]]; then
-            # 添加自定义路径到 AppArmor 本地覆盖（幂等：检查所有关键规则是否已存在）
+            # 添加自定义路径到 AppArmor 本地覆盖（幂等：使用标记块确保重复运行不会追加重复规则）
+            local marker_begin="# BEGIN Unbound install script rules"
+            local marker_end="# END Unbound install script rules"
             local needs_update=false
             if [[ ! -f "$apparmor_local" ]]; then
                 needs_update=true
-            elif ! grep -q "${UNBOUND_LOG_DIR}/" "$apparmor_local" 2>/dev/null || \
-                 ! grep -q "/var/lib/unbound/" "$apparmor_local" 2>/dev/null; then
+            elif ! grep -qF "$marker_begin" "$apparmor_local" 2>/dev/null; then
                 needs_update=true
             fi
             if [[ "$needs_update" == "true" ]]; then
                 cat >> "$apparmor_local" <<APPARMOR
-# 由 Unbound 安装脚本添加 - 允许自定义日志和数据目录
+${marker_begin}
 ${UNBOUND_LOG_DIR}/ r,
 ${UNBOUND_LOG_DIR}/** rw,
 /var/lib/unbound/ r,
 /var/lib/unbound/** rw,
+${marker_end}
 APPARMOR
-                # 重新加载 AppArmor 配置
-                if apparmor_parser -r /etc/apparmor.d/usr.sbin.unbound 2>/dev/null; then
-                    info "AppArmor 配置已更新以允许 Unbound 自定义路径。"
-                else
-                    warn "AppArmor 配置重载失败，可能需要手动检查。"
-                fi
+            else
+                # 标记块已存在，原地替换以确保内容最新
+                sed -i "/${marker_begin}/,/${marker_end}/c\\
+${marker_begin}\\
+${UNBOUND_LOG_DIR}/ r,\\
+${UNBOUND_LOG_DIR}/** rw,\\
+/var/lib/unbound/ r,\\
+/var/lib/unbound/** rw,\\
+${marker_end}" "$apparmor_local"
+            fi
+            # 重新加载 AppArmor 配置
+            if apparmor_parser -r /etc/apparmor.d/usr.sbin.unbound 2>/dev/null; then
+                info "AppArmor 配置已更新以允许 Unbound 自定义路径。"
+            else
+                warn "AppArmor 配置重载失败，可能需要手动检查。"
             fi
         fi
     fi
@@ -516,18 +527,16 @@ setup_dnssec() {
     if root_hints_tmp="$(mktemp)"; then
         # 立即设置 RETURN 陷阱，确保临时文件在函数退出时被清理
         trap 'rm -f "$root_hints_tmp"' RETURN
-        if curl -sSf --retry 3 --retry-delay 5 -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
+        if curl -sSf --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 5 -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
             # 验证下载的文件确实是根提示文件（至少应包含根服务器记录）
             if grep -q "$ROOT_HINTS_MARKER" "$root_hints_tmp" 2>/dev/null; then
                 mv "$root_hints_tmp" "$root_hints"
                 info "已下载最新的根提示文件。"
             else
-                rm -f "$root_hints_tmp"
                 warn "下载的文件内容无效（未包含 ${ROOT_HINTS_MARKER}），使用系统默认值。"
                 cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
             fi
         else
-            rm -f "$root_hints_tmp"
             warn "无法下载根提示文件或文件为空，使用系统默认值。"
             cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
         fi
@@ -1167,7 +1176,7 @@ ROOT_HINTS_MARKER="ROOT-SERVERS"
 TEMP_FILE=$(mktemp) || { logger -t "root-hints-update" "无法创建临时文件"; exit 1; }
 trap 'rm -f "$TEMP_FILE"' EXIT
 
-if curl -sSf --retry 3 --retry-delay 5 -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
+if curl -sSf --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 5 -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
     if [[ -s "$TEMP_FILE" ]] && grep -q "$ROOT_HINTS_MARKER" "$TEMP_FILE" 2>/dev/null; then
         mv "$TEMP_FILE" "$ROOT_HINTS"
         chown unbound:unbound "$ROOT_HINTS"
