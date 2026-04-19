@@ -5,17 +5,19 @@
 #
 # 功能特性:
 #   - DNSSEC 验证及自动根信任锚管理
-#   - DNS-over-TLS (DoT, 端口 853) 和 DNS-over-HTTPS (DoH, 端口 443)
-#   - 针对低延迟公共 DNS 的高性能调优
+#   - 针对低延迟公共 DNS 的高性能调优（仅端口 53 UDP/TCP）
 #   - CIS 基准和 PCI-DSS 合规加固（内核、SSH、文件系统、服务）
 #   - 速率限制、访问控制和防放大攻击
 #   - Systemd 服务沙箱隔离
 #   - UFW 防火墙（基于 nftables 后端）
 #   - 全面的日志记录和监控
-#   - 自动 TLS 证书配置 (Let's Encrypt)
+#
+# 注意: DOT (DNS-over-TLS, 端口 853) 和 DoH (DNS-over-HTTPS, 端口 443) 由
+#       单独安装的 NGINX 反向代理实现，SSL 证书也在安装 NGINX 时申请。
+#       本脚本仅配置 Unbound 作为纯 DNS 递归解析服务器（端口 53）。
 #
 # 用法:
-#   sudo bash install_unbound.sh --domain <你的DNS域名> --email <你的邮箱>
+#   sudo bash install_unbound.sh
 #
 # Azure Standard_B2ats_v2: 2 vCPU (Arm64), 1 GiB 内存
 # 针对 2 线程、保守缓存大小和积极预取进行优化。
@@ -38,13 +40,9 @@ readonly BACKUP_DIR
 readonly UNBOUND_CONF_DIR="/etc/unbound/unbound.conf.d"
 readonly UNBOUND_MAIN_CONF="/etc/unbound/unbound.conf"
 readonly UNBOUND_LOG_DIR="/var/log/unbound"
-# TLS / ACME 证书目录
-readonly CERT_DIR="/etc/unbound/tls"
 
-# 网络端口默认值
+# 网络端口默认值（仅 DNS 端口 53，DOT/DoH 由 NGINX 处理）
 readonly DNS_PORT=53
-readonly DOT_PORT=853
-readonly DOH_PORT=443
 
 # 性能调优参数 (适配 Standard_B2ats_v2: 2 vCPU, 1 GiB 内存)
 readonly NUM_THREADS=2
@@ -77,9 +75,6 @@ readonly NC='\033[0m'
 ###############################################################################
 # 全局变量（通过命令行参数设置）
 ###############################################################################
-DOMAIN=""
-EMAIL=""
-SKIP_CERTBOT="false"
 DRY_RUN="false"
 
 ###############################################################################
@@ -130,18 +125,18 @@ usage() {
     cat <<EOF
 用法: sudo $SCRIPT_NAME [选项]
 
-必需参数:
-  --domain <域名>       TLS 证书使用的域名 (例如: dns.example.com)
-  --email  <邮箱>       Let's Encrypt 证书通知邮箱
-
 可选参数:
-  --skip-certbot        跳过 Let's Encrypt 证书配置（使用自签名证书）
   --dry-run             仅显示将要执行的操作，不做任何更改
   -h, --help            显示此帮助信息
   -v, --version         显示脚本版本
 
+注意:
+  DOT (DNS-over-TLS) 和 DoH (DNS-over-HTTPS) 由单独安装的 NGINX 实现。
+  SSL 证书在安装 NGINX 时申请。本脚本仅配置 Unbound 纯 DNS 递归解析。
+
 示例:
-  sudo $SCRIPT_NAME --domain dns.example.com --email admin@example.com
+  sudo $SCRIPT_NAME
+  sudo $SCRIPT_NAME --dry-run
 EOF
     exit 0
 }
@@ -152,30 +147,6 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --domain=*)
-                DOMAIN="${1#*=}"
-                [[ -z "$DOMAIN" ]] && fatal "--domain 参数需要一个值"
-                shift
-                ;;
-            --domain)
-                DOMAIN="${2:-}"
-                [[ -z "$DOMAIN" ]] && fatal "--domain 参数需要一个值"
-                shift 2
-                ;;
-            --email=*)
-                EMAIL="${1#*=}"
-                [[ -z "$EMAIL" ]] && fatal "--email 参数需要一个值"
-                shift
-                ;;
-            --email)
-                EMAIL="${2:-}"
-                [[ -z "$EMAIL" ]] && fatal "--email 参数需要一个值"
-                shift 2
-                ;;
-            --skip-certbot)
-                SKIP_CERTBOT="true"
-                shift
-                ;;
             --dry-run)
                 DRY_RUN="true"
                 shift
@@ -192,26 +163,6 @@ parse_args() {
                 ;;
         esac
     done
-
-    if [[ -z "$DOMAIN" ]]; then
-        fatal "缺少必需参数 --domain。使用 --help 查看用法。"
-    fi
-    if [[ -z "$EMAIL" && "$SKIP_CERTBOT" == "false" ]]; then
-        fatal "缺少必需参数 --email（Let's Encrypt 需要）。使用 --skip-certbot 可跳过。"
-    fi
-
-    # 验证域名格式（RFC 1035: 每个标签以字母数字开头和结尾，中间允许连字符）
-    if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$ ]]; then
-        fatal "无效的域名格式: $DOMAIN"
-    fi
-    if [[ ${#DOMAIN} -gt 253 ]]; then
-        fatal "域名长度超过 253 字符限制: $DOMAIN"
-    fi
-
-    # 验证邮箱格式（如果提供）
-    if [[ -n "$EMAIL" && ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
-        fatal "无效的邮箱格式: $EMAIL"
-    fi
 }
 
 ###############################################################################
@@ -321,11 +272,6 @@ install_packages() {
         net-tools
         sudo
     )
-
-    # 仅在需要 Let's Encrypt 时安装 certbot（最小化安装原则）
-    if [[ "$SKIP_CERTBOT" == "false" ]]; then
-        packages+=(certbot)
-    fi
 
     apt-get install -y -qq "${packages[@]}"
 
@@ -469,14 +415,11 @@ setup_unbound_dirs() {
     # 创建必需的目录
     mkdir -p "$UNBOUND_CONF_DIR"
     mkdir -p "$UNBOUND_LOG_DIR"
-    mkdir -p "$CERT_DIR"
     mkdir -p /var/lib/unbound
 
     # 设置目录所有者和权限
     chown -R unbound:unbound "$UNBOUND_LOG_DIR"
     chmod 750 "$UNBOUND_LOG_DIR"
-    chown -R unbound:unbound "$CERT_DIR"
-    chmod 750 "$CERT_DIR"
     chown -R unbound:unbound /var/lib/unbound
     chmod 750 /var/lib/unbound
 
@@ -510,95 +453,6 @@ setup_dnssec() {
 }
 
 ###############################################################################
-# TLS 证书配置
-###############################################################################
-setup_tls() {
-    info "正在设置 TLS 证书..."
-
-    if [[ "$SKIP_CERTBOT" == "true" ]]; then
-        info "正在生成自签名 TLS 证书..."
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
-            -keyout "$CERT_DIR/privkey.pem" \
-            -out "$CERT_DIR/fullchain.pem" \
-            -days 365 -nodes \
-            -subj "/CN=$DOMAIN/O=DNS Server/C=US" \
-            -addext "subjectAltName=DNS:$DOMAIN" 2>/dev/null
-
-        chown unbound:unbound "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
-        chmod 640 "$CERT_DIR/privkey.pem"
-        chmod 644 "$CERT_DIR/fullchain.pem"
-        info "自签名证书已生成。"
-    else
-        info "正在为 $DOMAIN 配置 Let's Encrypt 证书..."
-
-        # 如果 UFW 已激活，临时开放 80 端口用于 ACME 验证
-        local ufw_was_active="false"
-        if ufw status 2>/dev/null | grep -q "Status: active"; then
-            ufw_was_active="true"
-            ufw allow 80/tcp >/dev/null 2>&1
-            info "已临时开放 80 端口用于 ACME 验证。"
-        fi
-
-        # 使用 standalone 模式申请证书
-        certbot certonly --standalone \
-            --non-interactive \
-            --agree-tos \
-            --email "$EMAIL" \
-            --domain "$DOMAIN" \
-            --preferred-challenges http \
-            --key-type ecdsa \
-            --elliptic-curve secp256r1 \
-            || fatal "Certbot 失败。使用 --skip-certbot 可改用自签名证书。"
-
-        # 如果之前打开了临时端口，现在关闭
-        if [[ "$ufw_was_active" == "true" ]]; then
-            ufw delete allow 80/tcp >/dev/null 2>&1
-            info "已关闭临时 80 端口。"
-        fi
-
-        # 复制证书到 Unbound TLS 目录
-        cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
-        cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$CERT_DIR/privkey.pem"
-        chown unbound:unbound "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
-        chmod 640 "$CERT_DIR/privkey.pem"
-        chmod 644 "$CERT_DIR/fullchain.pem"
-
-        # 设置 certbot 续期钩子（Debian certbot.timer 负责续期调度）
-        mkdir -p /etc/letsencrypt/renewal-hooks/pre
-        mkdir -p /etc/letsencrypt/renewal-hooks/post
-        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-
-        # 续期前钩子：开放 80 端口用于 ACME 验证
-        cat > /etc/letsencrypt/renewal-hooks/pre/open-firewall.sh <<'PREHOOK'
-#!/usr/bin/env bash
-ufw allow 80/tcp >/dev/null 2>&1 || true
-PREHOOK
-        chmod 755 /etc/letsencrypt/renewal-hooks/pre/open-firewall.sh
-
-        # 续期后钩子：关闭 80 端口
-        cat > /etc/letsencrypt/renewal-hooks/post/close-firewall.sh <<'POSTHOOK'
-#!/usr/bin/env bash
-ufw delete allow 80/tcp >/dev/null 2>&1 || true
-POSTHOOK
-        chmod 755 /etc/letsencrypt/renewal-hooks/post/close-firewall.sh
-
-        # 部署钩子：复制证书并重载 Unbound
-        cat > /etc/letsencrypt/renewal-hooks/deploy/update-unbound-certs.sh <<EOF
-#!/usr/bin/env bash
-cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
-cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$CERT_DIR/privkey.pem"
-chown unbound:unbound "$CERT_DIR/fullchain.pem" "$CERT_DIR/privkey.pem"
-chmod 640 "$CERT_DIR/privkey.pem"
-chmod 644 "$CERT_DIR/fullchain.pem"
-systemctl reload unbound 2>/dev/null || true
-EOF
-        chmod 755 /etc/letsencrypt/renewal-hooks/deploy/update-unbound-certs.sh
-
-        info "Let's Encrypt 证书已配置，自动续期钩子已就绪。"
-    fi
-}
-
-###############################################################################
 # 生成 Unbound 配置文件
 ###############################################################################
 configure_unbound() {
@@ -619,13 +473,12 @@ EOF
 # =============================================================================
 # 服务器核心配置
 # 针对 Azure Standard_B2ats_v2 (2 vCPU, 1 GiB 内存) 优化
+# Unbound 仅提供端口 53 DNS 服务，DOT/DoH 由 NGINX 反向代理处理
 # =============================================================================
 server:
-    # --- 接口绑定 ---
+    # --- 接口绑定（仅 DNS 端口 53）---
     interface: 0.0.0.0@${DNS_PORT}
     interface: ::0@${DNS_PORT}
-    interface: 0.0.0.0@${DOT_PORT}
-    interface: ::0@${DOT_PORT}
 
     # --- 访问控制（公共 DNS）---
     access-control: 0.0.0.0/0 allow
@@ -646,20 +499,7 @@ server:
     do-tcp: yes
     prefer-ip6: no
 
-    # --- TLS (DNS-over-TLS 端口 853) ---
-    tls-service-key: "${CERT_DIR}/privkey.pem"
-    tls-service-pem: "${CERT_DIR}/fullchain.pem"
-    tls-port: ${DOT_PORT}
-    # 仅使用强加密套件（PCI-DSS 要求）
-    # TLS 1.2 加密套件（OpenSSL 格式）
-    tls-ciphers: "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
-    # TLS 1.3 加密套件
-    tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-    # 注意: 以上密码套件配置隐式要求 TLS 1.2+（PCI-DSS 3.2.1 合规）。
-    # Unbound 使用 OpenSSL 默认最低版本（TLS 1.2），且以上密码套件
-    # 不包含任何 TLS 1.0/1.1 算法，确保了 TLS 1.2+ 强制执行。
-    # 不使用上游 TLS 转发（本服务器直接递归查询根服务器）
-    tls-upstream: no
+    # --- TCP 连接设置 ---
     incoming-num-tcp: 1024
 
     # --- 性能调优 ---
@@ -726,7 +566,6 @@ server:
     harden-algo-downgrade: yes
     harden-large-queries: yes
     harden-short-bufsize: yes
-    harden-unknown-additional: yes
 
     # 使用 0x20 编码的随机位来防止欺骗
     use-caps-for-id: yes
@@ -806,31 +645,6 @@ EOF
 }
 
 ###############################################################################
-# 配置 DoH (DNS-over-HTTPS)
-###############################################################################
-configure_doh() {
-    info "正在配置 DNS-over-HTTPS (DoH) 支持..."
-
-    # Unbound 1.20+ 内置 HTTPS 支持，使用 https-port 指令
-    cat > "$UNBOUND_CONF_DIR/03-doh.conf" <<EOF
-# =============================================================================
-# DNS-over-HTTPS (DoH) 配置
-# =============================================================================
-server:
-    # DoH 接口绑定（必须显式声明才能监听 HTTPS 端口）
-    interface: 0.0.0.0@${DOH_PORT}
-    interface: ::0@${DOH_PORT}
-
-    # HTTPS 监听端口 (DoH)
-    https-port: ${DOH_PORT}
-    http-endpoint: "/dns-query"
-    http-notls-downstream: no
-EOF
-
-    info "DoH 已配置在端口 ${DOH_PORT}，路径 /dns-query"
-}
-
-###############################################################################
 # 域名黑名单 / RPZ（响应策略区域，企业标准配置）
 ###############################################################################
 configure_rpz() {
@@ -902,10 +716,10 @@ configure_firewall() {
     ufw allow 53/tcp >/dev/null 2>&1
     ufw allow 53/udp >/dev/null 2>&1
 
-    # DNS-over-TLS (端口 853)
+    # DNS-over-TLS (端口 853) - 由 NGINX 反向代理提供
     ufw allow 853/tcp >/dev/null 2>&1
 
-    # DNS-over-HTTPS (端口 443)
+    # DNS-over-HTTPS (端口 443) - 由 NGINX 反向代理提供
     ufw allow 443/tcp >/dev/null 2>&1
 
     # 启用日志记录（中等级别用于审计）
@@ -915,7 +729,7 @@ configure_firewall() {
     ufw --force enable >/dev/null 2>&1
 
     info "UFW 防火墙已配置并激活。"
-    info "已开放端口: SSH(22/tcp-限速), DNS(53/tcp+udp), DoT(853/tcp), DoH(443/tcp)"
+    info "已开放端口: SSH(22/tcp-限速), DNS(53/tcp+udp), DoT(853/tcp-NGINX), DoH(443/tcp-NGINX)"
 }
 
 ###############################################################################
@@ -931,7 +745,7 @@ configure_fail2ban() {
 # =============================================================================
 [unbound-dns-abuse]
 enabled  = true
-port     = 53,853,443
+port     = 53
 protocol = udp,tcp
 filter   = unbound-dns-abuse
 logpath  = /var/log/unbound/unbound.log
@@ -1106,23 +920,15 @@ check "端口 53 (UDP) 监听状态" "$?"
 ss -tlnp | grep -q ':53 ' 2>/dev/null
 check "端口 53 (TCP) 监听状态" "$?"
 
-# 检查 3: 端口 853 是否监听 (DoT)
-ss -tlnp | grep -q ':853 ' 2>/dev/null
-check "端口 853 (DoT) 监听状态" "$?"
-
-# 检查 4: 端口 443 是否监听 (DoH)
-ss -tlnp | grep -q ':443 ' 2>/dev/null
-check "端口 443 (DoH) 监听状态" "$?"
-
-# 检查 5: DNS 解析是否正常
+# 检查 3: DNS 解析是否正常
 dig @127.0.0.1 +short +time=5 +tries=2 example.com A >/dev/null 2>&1
 check "DNS 解析 (A 记录)" "$?"
 
-# 检查 6: DNSSEC 验证是否正常
+# 检查 4: DNSSEC 验证是否正常
 dig @127.0.0.1 +dnssec +short +time=5 +tries=2 example.com A >/dev/null 2>&1
 check "DNSSEC 解析" "$?"
 
-# 检查 7: DNSSEC 是否拒绝无效签名
+# 检查 5: DNSSEC 是否拒绝无效签名
 dnssec_fail=$(dig @127.0.0.1 +time=5 +tries=2 dnssec-failed.org A 2>&1 | grep -c "SERVFAIL" || true)
 if [[ "$dnssec_fail" -ge 1 ]]; then
     check "DNSSEC 拒绝无效签名" "0"
@@ -1130,7 +936,7 @@ else
     check "DNSSEC 拒绝无效签名" "1"
 fi
 
-# 检查 8: unbound-control 是否正常
+# 检查 6: unbound-control 是否正常
 unbound-control status >/dev/null 2>&1
 check "unbound-control 运行状态" "$?"
 
@@ -1331,15 +1137,13 @@ post_install_validation() {
     fi
 
     # 测试 4: 端口监听状态
-    for port in 53 853 443; do
-        if ss -tlnp | grep -q ":${port} "; then
-            printf '%b[通过]%b TCP 端口 %s 正在监听\n' "${GREEN}" "${NC}" "${port}"
-            pass=$((pass + 1))
-        else
-            printf '%b[失败]%b TCP 端口 %s 未监听\n' "${RED}" "${NC}" "${port}"
-            fail=$((fail + 1))
-        fi
-    done
+    if ss -tlnp | grep -q ":53 "; then
+        printf '%b[通过]%b TCP 端口 53 正在监听\n' "${GREEN}" "${NC}"
+        pass=$((pass + 1))
+    else
+        printf '%b[失败]%b TCP 端口 53 未监听\n' "${RED}" "${NC}"
+        fail=$((fail + 1))
+    fi
 
     if ss -ulnp | grep -q ":53 "; then
         printf '%b[通过]%b UDP 端口 53 正在监听\n' "${GREEN}" "${NC}"
@@ -1415,20 +1219,16 @@ print_summary() {
 ║                                                                            ║
 ║  监听端口:                                                                  ║
 ║    • DNS (UDP/TCP):  ${DNS_PORT}                                                    ║
-║    • DNS-over-TLS:   ${DOT_PORT}                                                   ║
-║    • DNS-over-HTTPS: ${DOH_PORT}                                                   ║
 ║    • 远程控制:       8953 (仅限本地)                                         ║
+║                                                                            ║
+║  注意: DOT (端口 853) 和 DoH (端口 443) 由 NGINX 反向代理提供               ║
+║        请单独安装和配置 NGINX 以启用 DOT/DoH 功能                            ║
 ║                                                                            ║
 ║  配置文件:                                                                  ║
 ║    • 主配置:        ${UNBOUND_MAIN_CONF}                           ║
 ║    • 服务器:        ${UNBOUND_CONF_DIR}/01-server.conf       ║
 ║    • 远程控制:      ${UNBOUND_CONF_DIR}/02-remote-control.conf║
-║    • DoH:           ${UNBOUND_CONF_DIR}/03-doh.conf          ║
 ║    • 黑名单:        ${UNBOUND_CONF_DIR}/04-blocklist.conf    ║
-║                                                                            ║
-║  TLS 证书:                                                                  ║
-║    • 证书文件:      ${CERT_DIR}/fullchain.pem                        ║
-║    • 私钥文件:      ${CERT_DIR}/privkey.pem                          ║
 ║                                                                            ║
 ║  常用命令:                                                                  ║
 ║    • 健康检查:      /usr/local/bin/unbound-health-check -v                 ║
@@ -1440,8 +1240,6 @@ print_summary() {
 ║                                                                            ║
 ║  安全特性:                                                                  ║
 ║    ✓ DNSSEC 验证已启用                                                      ║
-║    ✓ DNS-over-TLS (DoT) 端口 853                                           ║
-║    ✓ DNS-over-HTTPS (DoH) 端口 443                                         ║
 ║    ✓ 速率限制（每 IP 和全局）                                                ║
 ║    ✓ UFW 防火墙（基于 nftables 后端）                                       ║
 ║    ✓ Fail2Ban DNS 滥用防护                                                  ║
@@ -1589,9 +1387,8 @@ main() {
     info "║   目标: Debian 13 / Azure Standard_B2ats_v2                 ║"
     info "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    info "域名: $DOMAIN"
-    info "邮箱: ${EMAIL:-N/A}"
-    info "跳过 Certbot: $SKIP_CERTBOT"
+    info "Unbound 仅提供 DNS 端口 53 服务"
+    info "DOT/DoH 将由单独安装的 NGINX 反向代理提供"
     echo ""
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -1599,24 +1396,24 @@ main() {
         info "将要执行以下步骤:"
         info "  1.  安装前环境检查（root 权限、系统版本、内存、网络）"
         info "  2.  备份现有配置文件"
-        info "  3.  安装必需的软件包（unbound, certbot, fail2ban 等）"
+        info "  3.  安装必需的软件包（unbound, fail2ban 等）"
         info "  4.  应用 DNS 性能调优和 CIS 内核安全加固"
         info "  5.  创建 Unbound 用户和目录结构"
         info "  6.  配置 DNSSEC 信任锚和根提示文件"
-        info "  7.  设置 TLS 证书（Let's Encrypt 或自签名）"
-        info "  8.  生成 Unbound 主配置文件"
-        info "  9.  配置 DNS-over-HTTPS (DoH)"
-        info "  10. 配置域名黑名单/RPZ"
-        info "  11. 配置 UFW 防火墙规则"
-        info "  12. 配置 Fail2Ban DNS 滥用防护"
-        info "  13. 配置日志轮转（90 天保留）"
-        info "  14. 应用 Systemd 服务安全加固"
-        info "  15. 创建监控和健康检查脚本"
-        info "  16. SSH 安全加固（CIS 基准）"
-        info "  17. 配置登录横幅"
-        info "  18. 验证配置文件语法"
-        info "  19. 启动 Unbound 服务"
-        info "  20. 运行安装后验证测试"
+        info "  7.  生成 Unbound 主配置文件（仅 DNS 端口 53）"
+        info "  8.  配置域名黑名单/RPZ"
+        info "  9.  配置 UFW 防火墙规则"
+        info "  10. 配置 Fail2Ban DNS 滥用防护"
+        info "  11. 配置日志轮转（90 天保留）"
+        info "  12. 应用 Systemd 服务安全加固"
+        info "  13. 创建监控和健康检查脚本"
+        info "  14. SSH 安全加固（CIS 基准）"
+        info "  15. 配置登录横幅"
+        info "  16. 验证配置文件语法"
+        info "  17. 启动 Unbound 服务"
+        info "  18. 运行安装后验证测试"
+        info ""
+        info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
     fi
 
@@ -1627,9 +1424,7 @@ main() {
     tune_system_for_dns
     setup_unbound_dirs
     setup_dnssec
-    setup_tls
     configure_unbound
-    configure_doh
     configure_rpz
     configure_firewall
     configure_fail2ban
