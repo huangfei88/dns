@@ -16,7 +16,6 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - **UFW firewall** (nftables backend) with default-deny policy and rate-limited SSH
 - **Fail2Ban** integration for DNS abuse protection
 - **Systemd sandboxing** (ProtectSystem, NoNewPrivileges, MemoryDenyWriteExecute, etc.)
-- **SSH hardening** (CIS 5.2: strong ciphers, idle timeout, PermitRootLogin no, etc.)
 - **deny-any** to prevent amplification attacks
 - **Minimal responses** to reduce attack surface
 - Server identity and version hidden
@@ -145,7 +144,6 @@ Note:
 | `/etc/unbound/blocklist.conf` | Custom domain blocklist entries |
 | `/etc/sysctl.d/99-unbound-dns.conf` | DNS performance + CIS kernel security tuning |
 | `/etc/security/limits.d/99-disable-coredumps.conf` | Core dump restrictions |
-| `/etc/ssh/sshd_config.d/99-cis-hardening.conf` | SSH server hardening (CIS 5.2) |
 
 ## Management Commands
 
@@ -209,7 +207,6 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 - [x] Login banners (pre-login and post-login)
 - [x] ASLR enabled
 - [x] BPF and ptrace restrictions
-- [x] SSH server hardening (CIS 5.2: strong ciphers, idle timeout, MaxAuthTries, PermitRootLogin no, etc.)
 
 ### PCI-DSS Requirements
 - [x] TLS 1.2+ for encrypted DNS via NGINX proxy (Requirement 4.1)
@@ -318,10 +315,9 @@ The script will automatically:
 5. Configure UFW firewall with default-deny policy
 6. Set up Fail2Ban for DNS abuse protection
 7. Apply systemd sandboxing
-8. Harden SSH server configuration (CIS 5.2)
-9. Create monitoring scripts and maintenance timers
-10. Validate configuration and start the service
-11. Run post-installation health checks
+8. Create monitoring scripts and maintenance timers
+9. Validate configuration and start the service
+10. Run post-installation health checks
 
 > **Tip**: The installation log is saved to `/var/log/unbound-install.log`. If anything goes wrong, check this file first.
 
