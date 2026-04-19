@@ -25,11 +25,12 @@
 
 set -Eeuo pipefail
 IFS=$'\n\t'
+umask 0027
 
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.6.0"
+readonly SCRIPT_VERSION="1.7.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -487,10 +488,24 @@ SYSCTL
     cat > /etc/security/limits.d/99-disable-coredumps.conf <<'EOF'
 # 禁用核心转储 - CIS 基准 1.5.1
 * hard core 0
+* soft core 0
 EOF
     chmod 0644 /etc/security/limits.d/99-disable-coredumps.conf
     chown root:root /etc/security/limits.d/99-disable-coredumps.conf
-    info "核心转储已禁用。"
+
+    # 禁用 systemd 核心转储收集（CIS 1.5.1 补充）
+    mkdir -p /etc/systemd/coredump.conf.d
+    chmod 0755 /etc/systemd/coredump.conf.d
+    chown root:root /etc/systemd/coredump.conf.d
+    cat > /etc/systemd/coredump.conf.d/99-disable-coredumps.conf <<'EOF'
+# 禁用 systemd 核心转储收集 - CIS 基准 1.5.1
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+    chmod 0644 /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
+    chown root:root /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
+    info "核心转储已禁用（limits.d + systemd coredump）。"
 }
 
 ###############################################################################
@@ -1245,6 +1260,7 @@ exit 0
 HEALTHCHECK
 
     chmod 755 /usr/local/bin/unbound-health-check
+    chown root:root /usr/local/bin/unbound-health-check
 
     # --- 统计信息收集脚本 ---
     cat > /usr/local/bin/unbound-stats <<'STATS'
@@ -1280,6 +1296,7 @@ done
 STATS
 
     chmod 755 /usr/local/bin/unbound-stats
+    chown root:root /usr/local/bin/unbound-stats
 
     # --- 根提示更新脚本（每月 systemd 定时器）---
     cat > /usr/local/bin/update-root-hints <<'ROOTHINTS'
@@ -1311,6 +1328,7 @@ fi
 ROOTHINTS
 
     chmod 755 /usr/local/bin/update-root-hints
+    chown root:root /usr/local/bin/update-root-hints
 
     # --- systemd 定时器：每月更新根提示文件 ---
     cat > /etc/systemd/system/update-root-hints.service <<'EOF'
@@ -1369,6 +1387,7 @@ logger -t "trust-anchor-update" "DNSSEC 信任锚更新任务完成"
 TRUSTANCHOR
 
     chmod 755 /usr/local/bin/update-trust-anchor
+    chown root:root /usr/local/bin/update-trust-anchor
 
     cat > /etc/systemd/system/update-trust-anchor.service <<'EOF'
 [Unit]
@@ -1761,6 +1780,9 @@ configure_ssh_hardening() {
 # 由 Unbound DNS 安装脚本自动配置
 # =============================================================================
 
+# CIS 5.2.3 - 日志级别（VERBOSE 记录密钥指纹等安全事件，满足审计要求）
+LogLevel VERBOSE
+
 # CIS 5.2.4 - 禁用 X11 转发（DNS 服务器不需要图形转发）
 X11Forwarding no
 
@@ -1793,6 +1815,7 @@ Banner /etc/issue.net
 Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
 KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
+HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
 
 # CIS 5.2.15 - 禁用 TCP 转发（DNS 服务器不需要 SSH 隧道）
 AllowTcpForwarding no
@@ -1808,6 +1831,12 @@ MaxStartups 10:30:60
 
 # 禁止用户设置环境变量
 PermitUserEnvironment no
+
+# 禁用 GSSAPI 认证（DNS 服务器不需要 Kerberos 认证）
+GSSAPIAuthentication no
+
+# 禁用 SSH 隧道（DNS 服务器不需要 VPN 隧道功能）
+PermitTunnel no
 
 # 使用 PAM 进行认证
 UsePAM yes
