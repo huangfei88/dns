@@ -450,17 +450,19 @@ setup_dnssec() {
     # 下载最新的根提示文件
     local root_hints="/var/lib/unbound/root.hints"
     local root_hints_tmp=""
-    root_hints_tmp="$(mktemp)" || { warn "无法创建临时文件，使用系统默认根提示。"; cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true; root_hints_tmp=""; }
-    # 确保临时文件在函数异常退出时被清理
-    if [[ -n "$root_hints_tmp" ]]; then
+    if root_hints_tmp="$(mktemp)"; then
+        # 立即设置 RETURN 陷阱，确保临时文件在函数退出时被清理
         trap 'rm -f "$root_hints_tmp"' RETURN
-    fi
-    if [[ -n "$root_hints_tmp" ]] && curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
-        mv "$root_hints_tmp" "$root_hints"
-        info "已下载最新的根提示文件。"
+        if curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
+            mv "$root_hints_tmp" "$root_hints"
+            info "已下载最新的根提示文件。"
+        else
+            rm -f "$root_hints_tmp"
+            warn "无法下载根提示文件或文件为空，使用系统默认值。"
+            cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
+        fi
     else
-        rm -f "$root_hints_tmp"
-        warn "无法下载根提示文件或文件为空，使用系统默认值。"
+        warn "无法创建临时文件，使用系统默认根提示。"
         cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
     fi
     chown unbound:unbound "$root_hints"
@@ -1101,9 +1103,19 @@ EOF
 ###############################################################################
 set -euo pipefail
 
-/usr/sbin/unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null || true
-systemctl reload unbound 2>/dev/null || true
-logger -t "trust-anchor-update" "DNSSEC 信任锚更新完成"
+anchor_exit=0
+/usr/sbin/unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null || anchor_exit=$?
+if [[ $anchor_exit -eq 0 ]]; then
+    logger -t "trust-anchor-update" "DNSSEC 信任锚无需更新"
+elif [[ $anchor_exit -eq 1 ]]; then
+    logger -t "trust-anchor-update" "DNSSEC 信任锚已更新"
+else
+    logger -t "trust-anchor-update" "unbound-anchor 执行失败 (退出码: $anchor_exit)"
+fi
+if ! systemctl reload unbound 2>/dev/null; then
+    logger -t "trust-anchor-update" "Unbound 重载失败，服务可能未运行"
+fi
+logger -t "trust-anchor-update" "DNSSEC 信任锚更新任务完成"
 TRUSTANCHOR
 
     chmod 755 /usr/local/bin/update-trust-anchor
