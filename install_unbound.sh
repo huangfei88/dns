@@ -1811,14 +1811,21 @@ EOF
     chown root:root /etc/ssh/sshd_config.d/99-cis-hardening.conf
 
     # 验证 SSH 配置语法正确后再重载
-    if sshd -t 2>/dev/null; then
+    local sshd_test_output=""
+    if sshd_test_output=$(sshd -t 2>&1); then
         # 使用 reload 而非 restart，避免断开当前 SSH 会话
         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
         info "SSH 安全加固已应用并重载。"
     else
         warn "SSH 配置验证失败，正在回滚以避免 SSH 服务中断..."
+        warn "sshd -t 输出: ${sshd_test_output}"
         rm -f /etc/ssh/sshd_config.d/99-cis-hardening.conf
-        warn "已删除 SSH 加固配置。请手动检查 SSH 设置。"
+        # 从备份恢复完整的 SSH 配置目录（如果备份存在）
+        if [[ -d "${BACKUP_DIR}/etc_ssh" ]]; then
+            cp -a "${BACKUP_DIR}/etc_ssh/." /etc/ssh/ 2>/dev/null || true
+            warn "已从备份恢复 SSH 配置: ${BACKUP_DIR}/etc_ssh"
+        fi
+        warn "SSH 加固配置已回滚。请手动检查 SSH 设置。"
     fi
 }
 
