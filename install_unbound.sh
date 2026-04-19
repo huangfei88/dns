@@ -669,7 +669,8 @@ server:
     outgoing-num-tcp: 100
     edns-tcp-keepalive: yes
     # TCP 空闲连接超时（毫秒）- 防止公共 DNS 上的 TCP 连接耗尽攻击
-    tcp-idle-timeout: 30000
+    # RFC 7766 建议 DNS-over-TCP 至少保持 10 秒；20 秒兼顾安全与兼容
+    tcp-idle-timeout: 20000
 
     # --- 性能调优 ---
     num-threads: ${NUM_THREADS}
@@ -1029,7 +1030,7 @@ configure_logrotate() {
     missingok
     notifempty
     dateext
-    dateformat -%Y%m%d
+    dateformat .%Y%m%d
     create 0640 unbound unbound
     sharedscripts
     postrotate
