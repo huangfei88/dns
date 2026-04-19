@@ -489,7 +489,10 @@ server:
     private-address: 172.16.0.0/12
     private-address: 192.168.0.0/16
     private-address: 169.254.0.0/16
-    private-address: fd00::/8
+    private-address: 100.64.0.0/10
+    private-address: 127.0.0.0/8
+    private-address: ::1/128
+    private-address: fc00::/7
     private-address: fe80::/10
 
     # --- 协议设置 ---
@@ -501,6 +504,7 @@ server:
 
     # --- TCP 连接设置 ---
     incoming-num-tcp: 1024
+    outgoing-num-tcp: 100
 
     # --- 性能调优 ---
     num-threads: ${NUM_THREADS}
@@ -520,6 +524,9 @@ server:
 
     # 使用连接式 UDP socket 提升速度
     udp-connect: yes
+
+    # 轮询 RRset 中的记录顺序以实现负载均衡
+    rrset-roundrobin: yes
 
     # --- 缓存优化 ---
     # 预取即将过期的条目（降低热门查询的延迟）

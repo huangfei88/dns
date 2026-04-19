@@ -8,8 +8,6 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 
 ### Security
 - **DNSSEC** validation with automatic root trust-anchor management
-- **DNS-over-TLS (DoT)** on port 853 with TLS 1.2+ (PCI-DSS 3.2.1)
-- **DNS-over-HTTPS (DoH)** on port 443
 - **QNAME minimisation** (RFC 7816) for upstream privacy
 - **0x20 query randomisation** to prevent spoofing
 - **Rate limiting** (per-IP and global) with automatic blocking
@@ -41,16 +39,16 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - Statistics collection (`/usr/local/bin/unbound-stats`)
 - Automatic root hints updates (monthly)
 - Automatic DNSSEC trust anchor updates (weekly)
-- Automatic TLS certificate renewal (Let's Encrypt)
 - Log rotation with 90-day retention
 
 ## Requirements
 
 - **OS**: Debian 13 (Trixie)
 - **VM**: Azure Standard_B2ats_v2 (2 vCPU Arm64, 1 GiB RAM) or similar
-- **Network**: Public IP address with ports 53, 443, 853 open
-- **DNS**: A domain name pointing to the server's public IP (for TLS certificates)
+- **Network**: Public IP address with port 53 open (ports 443/853 needed if NGINX proxy is used for DoT/DoH)
 - **Privileges**: Root access (sudo)
+
+> **Note**: DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are handled by a separately installed NGINX reverse proxy. TLS certificates are provisioned during the NGINX installation. This script only configures Unbound as a recursive DNS resolver on port 53.
 
 ## Quick Start
 
@@ -62,11 +60,11 @@ cd dns
 # Make the script executable
 chmod +x install_unbound.sh
 
-# Run with Let's Encrypt certificate
-sudo ./install_unbound.sh --domain dns.example.com --email admin@example.com
+# Run the installation
+sudo ./install_unbound.sh
 
-# Or run with self-signed certificate (for testing)
-sudo ./install_unbound.sh --domain dns.example.com --skip-certbot
+# Or preview what would be done (dry run)
+sudo ./install_unbound.sh --dry-run
 ```
 
 ## Usage
@@ -74,15 +72,16 @@ sudo ./install_unbound.sh --domain dns.example.com --skip-certbot
 ```
 Usage: sudo install_unbound.sh [OPTIONS]
 
-Required:
-  --domain <FQDN>      Domain name for TLS certificates (e.g., dns.example.com)
-  --email  <EMAIL>      Email for Let's Encrypt certificate notifications
-
 Optional:
-  --skip-certbot        Skip Let's Encrypt certificate provisioning (use self-signed)
   --dry-run             Show what would be done without making changes
   -h, --help            Show this help message
   -v, --version         Show script version
+
+Note:
+  DoT (DNS-over-TLS) and DoH (DNS-over-HTTPS) are handled by a separately
+  installed NGINX reverse proxy. TLS certificates are provisioned during NGINX
+  installation. This script only configures Unbound as a recursive DNS resolver
+  on port 53.
 ```
 
 ## Architecture
@@ -104,10 +103,16 @@ Optional:
      │  DNS (UDP/TCP)│  │  DoT (TLS)    │  │  DoH (HTTPS)  │
      └────────┬──────┘  └────────┬──────┘  └────────┬──────┘
               │                   │                   │
-              └───────────────────┼───────────────────┘
-                                  │
-                    ┌─────────────▼───────────────────────┐
+              │           ┌──────┴──────────────┐     │
+              │           │  NGINX Reverse Proxy │     │
+              │           │  (separate install)  │     │
+              │           └──────┬──────────────┘     │
+              │                  │   (proxy to 53)    │
+              └──────────────────┼────────────────────┘
+                                 │
+                    ┌────────────▼────────────────────────┐
                     │         Unbound DNS Server           │
+                    │         (Port 53 only)               │
                     │  ┌─────────────────────────────────┐ │
                     │  │  DNSSEC Validation               │ │
                     │  │  Cache (32MB msg + 64MB rrset)   │ │
@@ -131,7 +136,6 @@ Optional:
 | `/etc/unbound/unbound.conf` | Main configuration (includes modular configs) |
 | `/etc/unbound/unbound.conf.d/01-server.conf` | Core server settings, performance, security |
 | `/etc/unbound/unbound.conf.d/02-remote-control.conf` | Remote control (localhost only) |
-| `/etc/unbound/unbound.conf.d/03-doh.conf` | DNS-over-HTTPS configuration |
 | `/etc/unbound/unbound.conf.d/04-blocklist.conf` | Response policy / domain blocklist |
 | `/etc/unbound/blocklist.conf` | Custom domain blocklist entries |
 | `/etc/sysctl.d/99-unbound-dns.conf` | DNS performance + CIS kernel security tuning |
@@ -177,10 +181,10 @@ dig @<server-ip> example.com A
 # Test DNSSEC validation
 dig @<server-ip> +dnssec example.com A
 
-# Test DNS-over-TLS (requires kdig from knot-dnsutils)
+# Test DNS-over-TLS (requires NGINX proxy and kdig from knot-dnsutils)
 kdig @<server-ip> +tls example.com A
 
-# Test DNS-over-HTTPS
+# Test DNS-over-HTTPS (requires NGINX proxy)
 curl -H 'accept: application/dns-json' \
   'https://dns.example.com/dns-query?name=example.com&type=A'
 
@@ -200,8 +204,8 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 - [x] ASLR enabled
 
 ### PCI-DSS Requirements
-- [x] TLS 1.2+ for encrypted DNS (Requirement 4.1)
-- [x] Strong cipher suites only
+- [x] TLS 1.2+ for encrypted DNS via NGINX proxy (Requirement 4.1)
+- [x] Strong cipher suites (SSH and DNS transport)
 - [x] Comprehensive audit logging (Requirement 10)
 - [x] 90-day log retention (Requirement 10.7)
 - [x] Firewall with default-deny policy (Requirement 1)
@@ -230,8 +234,8 @@ sudo journalctl -u unbound -n 50 --no-pager
 # Verify configuration syntax
 sudo unbound-checkconf
 
-# Check listening ports
-sudo ss -tlnp | grep -E ':(53|853|443)\s'
+# Check listening ports (Unbound listens on port 53 only; 853/443 are via NGINX)
+sudo ss -tlnp | grep ':53\s'
 sudo ss -ulnp | grep ':53\s'
 
 # Test with verbose output
