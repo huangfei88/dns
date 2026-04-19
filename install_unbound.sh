@@ -1617,7 +1617,10 @@ main() {
     parse_args "$@"
 
     # 注册错误处理陷阱（在参数解析之后，确保 BACKUP_DIR 等变量可用）
-    trap 'cleanup_on_error $LINENO' ERR
+    # ERR: 命令失败时触发清理
+    # INT: 用户按 Ctrl+C 中断时触发清理
+    # TERM: 收到终止信号时触发清理
+    trap 'cleanup_on_error $LINENO' ERR INT TERM
 
     # 初始化日志文件
     mkdir -p "$(dirname "$LOG_FILE")"
