@@ -457,10 +457,8 @@ net.core.bpf_jit_harden = 2
 # 限制 ptrace 范围（CIS 1.5.4）
 kernel.yama.ptrace_scope = 2
 
-# 限制 Magic SysRq 键（CIS 1.5.2）- 仅保留安全的紧急恢复功能
-# 值 244 = 4(keyboard)+16(sync)+32(remount-ro)+64(signal)+128(reboot)
-# 禁用: console-loglevel(2), debug-dumps(8), nice-RT(256)
-kernel.sysrq = 244
+# 禁用 Magic SysRq 键（CIS 1.5.2）
+kernel.sysrq = 0
 
 # 限制非特权用户使用性能计数器（CIS 安全加固）
 kernel.perf_event_paranoid = 3
@@ -471,6 +469,8 @@ kernel.perf_event_paranoid = 3
 kernel.apparmor_restrict_unprivileged_userns = 1
 SYSCTL
 
+    chmod 0600 /etc/sysctl.d/99-unbound-dns.conf
+    chown root:root /etc/sysctl.d/99-unbound-dns.conf
     sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 参数可能未成功应用。"
     info "DNS 性能调优和内核安全加固参数已应用。"
 
@@ -479,6 +479,8 @@ SYSCTL
 # 禁用核心转储 - CIS 基准 1.5.1
 * hard core 0
 EOF
+    chmod 0644 /etc/security/limits.d/99-disable-coredumps.conf
+    chown root:root /etc/security/limits.d/99-disable-coredumps.conf
     info "核心转储已禁用。"
 }
 
@@ -617,6 +619,8 @@ configure_unbound() {
 # 引入模块化配置文件
 include-toplevel: "/etc/unbound/unbound.conf.d/*.conf"
 EOF
+    chmod 0644 "$UNBOUND_MAIN_CONF"
+    chown root:root "$UNBOUND_MAIN_CONF"
 
     # --- 服务器核心配置 ---
     cat > "$UNBOUND_CONF_DIR/01-server.conf" <<EOF
@@ -817,6 +821,8 @@ server:
     # 启用扩展统计信息（支持 unbound-stats 脚本获取详细数据）
     extended-statistics: yes
 EOF
+    chown root:unbound "$UNBOUND_CONF_DIR/01-server.conf"
+    chmod 0640 "$UNBOUND_CONF_DIR/01-server.conf"
 
     # --- 远程控制配置 ---
     cat > "$UNBOUND_CONF_DIR/02-remote-control.conf" <<'EOF'
@@ -835,6 +841,8 @@ remote-control:
     control-key-file: "/etc/unbound/unbound_control.key"
     control-cert-file: "/etc/unbound/unbound_control.pem"
 EOF
+    chown root:unbound "$UNBOUND_CONF_DIR/02-remote-control.conf"
+    chmod 0640 "$UNBOUND_CONF_DIR/02-remote-control.conf"
 
     # 生成 unbound-control 密钥
     unbound-control-setup 2>/dev/null || warn "unbound-control-setup 存在警告"
@@ -886,6 +894,8 @@ configure_rpz() {
 # local-zone: "example-malware.com." always_refuse
 # local-zone: "bad-actor.net." always_refuse
 EOF
+    chown root:unbound /etc/unbound/blocklist.conf
+    chmod 0640 /etc/unbound/blocklist.conf
 
     cat > "$UNBOUND_CONF_DIR/04-blocklist.conf" <<'EOF'
 # =============================================================================
@@ -918,6 +928,7 @@ server:
     local-zone: "168.192.in-addr.arpa." refuse
     local-zone: "254.169.in-addr.arpa." refuse
     local-zone: "2.0.192.in-addr.arpa." refuse
+    local-zone: "0.0.192.in-addr.arpa." refuse
     local-zone: "100.51.198.in-addr.arpa." refuse
     local-zone: "113.0.203.in-addr.arpa." refuse
     local-zone: "18.198.in-addr.arpa." refuse
@@ -930,6 +941,8 @@ server:
     local-zone: "a.e.f.ip6.arpa." refuse
     local-zone: "b.e.f.ip6.arpa." refuse
 EOF
+    chown root:unbound "$UNBOUND_CONF_DIR/04-blocklist.conf"
+    chmod 0640 "$UNBOUND_CONF_DIR/04-blocklist.conf"
 
     info "RPZ 黑名单配置完成。"
 }
@@ -991,6 +1004,8 @@ findtime = 60
 bantime  = 3600
 banaction = ufw
 EOF
+    chmod 0644 /etc/fail2ban/jail.d/unbound-dns.conf
+    chown root:root /etc/fail2ban/jail.d/unbound-dns.conf
 
     # 创建过滤器以匹配 Unbound 速率限制和错误日志条目
     # Unbound 日志格式 (VERB_OPS, verbosity >= 1):
@@ -1008,6 +1023,8 @@ failregex = ^.+\bunbound\[\d+:\d+\] info: ratelimit exceeded \S+ \d+ query .+ fr
             ^.+\bunbound\[\d+:\d+\] info: ip_ratelimit exceeded <HOST> \d+.*$
 ignoreregex =
 EOF
+    chmod 0644 /etc/fail2ban/filter.d/unbound-dns-abuse.conf
+    chown root:root /etc/fail2ban/filter.d/unbound-dns-abuse.conf
 
     systemctl enable fail2ban
     systemctl restart fail2ban 2>/dev/null || warn "Fail2Ban 重启遇到问题（将在重启后启动）"
@@ -1038,6 +1055,8 @@ configure_logrotate() {
     endscript
 }
 EOF
+    chmod 0644 /etc/logrotate.d/unbound
+    chown root:root /etc/logrotate.d/unbound
 
     info "日志轮转已配置（保留 365 天以满足 PCI-DSS v4.0 Req 10.7.1 要求：至少12个月审计日志）。"
 }
@@ -1104,6 +1123,8 @@ Restart=always
 RestartSec=5
 WatchdogSec=60
 EOF
+    chmod 0644 /etc/systemd/system/unbound.service.d/hardening.conf
+    chown root:root /etc/systemd/system/unbound.service.d/hardening.conf
 
     # 确保 PID 目录存在
     mkdir -p /run/unbound
@@ -1113,6 +1134,8 @@ EOF
     cat > /etc/tmpfiles.d/unbound.conf <<'EOF'
 d /run/unbound 0755 unbound unbound -
 EOF
+    chmod 0644 /etc/tmpfiles.d/unbound.conf
+    chown root:root /etc/tmpfiles.d/unbound.conf
 
     systemctl daemon-reload
     info "Systemd 服务安全加固已应用。"
@@ -1271,6 +1294,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/bin/update-root-hints
 EOF
+    chmod 0644 /etc/systemd/system/update-root-hints.service
 
     cat > /etc/systemd/system/update-root-hints.timer <<'EOF'
 [Unit]
@@ -1284,6 +1308,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+    chmod 0644 /etc/systemd/system/update-root-hints.timer
 
     systemctl daemon-reload
     systemctl enable --now update-root-hints.timer 2>/dev/null || true
@@ -1324,6 +1349,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/bin/update-trust-anchor
 EOF
+    chmod 0644 /etc/systemd/system/update-trust-anchor.service
 
     cat > /etc/systemd/system/update-trust-anchor.timer <<'EOF'
 [Unit]
@@ -1337,6 +1363,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+    chmod 0644 /etc/systemd/system/update-trust-anchor.timer
 
     systemctl daemon-reload
     systemctl enable --now update-trust-anchor.timer 2>/dev/null || true
