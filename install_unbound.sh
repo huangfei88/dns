@@ -29,7 +29,7 @@ IFS=$'\n\t'
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.3.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -538,6 +538,7 @@ server:
     # --- TCP 连接设置 ---
     incoming-num-tcp: 1024
     outgoing-num-tcp: 100
+    edns-tcp-keepalive: yes
 
     # --- 性能调优 ---
     num-threads: ${NUM_THREADS}
@@ -805,16 +806,19 @@ banaction = ufw
 EOF
 
     # 创建过滤器以匹配 Unbound 速率限制和错误日志条目
-    # Unbound 日志格式: [timestamp] unbound[pid:tid] info: ratelimit for <IP> ...
+    # Unbound 日志格式 (VERB_OPS, verbosity >= 1):
+    #   域名速率限制: [ts] unbound[pid:tid] info: ratelimit exceeded <zone> <limit> query <qname> <class> <type> from <ip>
+    #   IP 速率限制:   [ts] unbound[pid:tid] info: ip_ratelimit exceeded <ip> <limit>[cookie] <query>
     cat > /etc/fail2ban/filter.d/unbound-dns-abuse.conf <<'EOF'
 # =============================================================================
 # Fail2Ban Unbound DNS 滥用过滤器
-# 匹配 Unbound 记录的速率限制违规（verbosity >= 0）
-# 日志格式: [timestamp] unbound[pid:tid] info: ratelimit for <IP> ...
+# 匹配 Unbound 记录的速率限制违规（verbosity >= 1, VERB_OPS）
+# 域名速率限制日志: ratelimit exceeded <zone> <limit> query ... from <ip>
+# IP 速率限制日志:   ip_ratelimit exceeded <ip> <limit>... <query>
 # =============================================================================
 [Definition]
-failregex = ^.+\bunbound\[\d+:\d+\] info: ratelimit for <HOST>\b.*$
-            ^.+\bunbound\[\d+:\d+\] info: ip_ratelimit for <HOST>\b.*$
+failregex = ^.+\bunbound\[\d+:\d+\] info: ratelimit exceeded \S+ \d+ query .+ from <HOST>\s*$
+            ^.+\bunbound\[\d+:\d+\] info: ip_ratelimit exceeded <HOST> \d+.*$
 ignoreregex =
 EOF
 
@@ -1399,6 +1403,9 @@ harden_ssh() {
 
 # 注意: Protocol 2 在现代 OpenSSH (7.6+) 中已移除 SSH v1 支持，
 # 该指令已废弃，无需显式声明。
+
+# 禁止 root 使用密码登录（CIS 5.2.10）- 仅允许密钥认证
+PermitRootLogin prohibit-password
 
 # 最大认证尝试次数（CIS 5.2.6）
 MaxAuthTries 4
