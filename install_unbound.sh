@@ -237,7 +237,25 @@ backup_existing() {
         cp -a /etc/sysctl.d "$BACKUP_DIR/etc_sysctl.d" 2>/dev/null || true
     fi
 
+    # 备份 fail2ban 配置
+    if [[ -d /etc/fail2ban ]]; then
+        cp -a /etc/fail2ban "$BACKUP_DIR/etc_fail2ban" 2>/dev/null || true
+        info "已备份 /etc/fail2ban"
+    fi
 
+    # 备份 systemd 自定义服务文件
+    if [[ -d /etc/systemd/system ]]; then
+        mkdir -p "$BACKUP_DIR/etc_systemd_system"
+        cp -a /etc/systemd/system/unbound.service.d "$BACKUP_DIR/etc_systemd_system/" 2>/dev/null || true
+        cp -a /etc/systemd/system/update-root-hints.* "$BACKUP_DIR/etc_systemd_system/" 2>/dev/null || true
+        cp -a /etc/systemd/system/update-trust-anchor.* "$BACKUP_DIR/etc_systemd_system/" 2>/dev/null || true
+    fi
+
+    # 备份 resolv.conf
+    if [[ -f /etc/resolv.conf ]]; then
+        cp -a /etc/resolv.conf "$BACKUP_DIR/resolv.conf" 2>/dev/null || true
+        info "已备份 /etc/resolv.conf"
+    fi
 }
 
 ###############################################################################
@@ -246,9 +264,11 @@ backup_existing() {
 install_packages() {
     info "正在更新系统软件包..."
     export DEBIAN_FRONTEND=noninteractive
+    # 防止 needrestart 在 Debian 13 上弹出交互式提示
+    export NEEDRESTART_MODE=a
 
     apt-get update -qq
-    apt-get upgrade -y -qq
+    apt-get upgrade -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef"
 
     info "正在安装必需的软件包..."
     local packages=(
@@ -270,9 +290,10 @@ install_packages() {
         rsyslog
         net-tools
         sudo
+        e2fsprogs
     )
 
-    apt-get install -y -qq "${packages[@]}"
+    apt-get install -y -qq -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" "${packages[@]}"
 
     # 清理 APT 缓存以释放磁盘空间（对 1 GiB 内存环境尤为重要）
     apt-get clean
@@ -772,10 +793,12 @@ configure_firewall() {
     ufw allow 53/tcp >/dev/null 2>&1
     ufw allow 53/udp >/dev/null 2>&1
 
-    # DNS-over-TLS (端口 853) - 由 NGINX 反向代理提供
+    # DNS-over-TLS (端口 853) - 预留给后续安装的 NGINX 反向代理
+    # 如未安装 NGINX，可安全移除此规则: ufw delete allow 853/tcp
     ufw allow 853/tcp >/dev/null 2>&1
 
-    # DNS-over-HTTPS (端口 443) - 由 NGINX 反向代理提供
+    # DNS-over-HTTPS (端口 443) - 预留给后续安装的 NGINX 反向代理
+    # 如未安装 NGINX，可安全移除此规则: ufw delete allow 443/tcp
     ufw allow 443/tcp >/dev/null 2>&1
 
     # 启用日志记录（中等级别用于审计）
@@ -974,10 +997,10 @@ systemctl is-active --quiet unbound 2>/dev/null
 check "Unbound 服务运行状态" "$?"
 
 # 检查 2: 端口 53 是否监听
-ss -ulnp | grep -q ':53 ' 2>/dev/null
+ss -ulnp | grep -qE ':53\b' 2>/dev/null
 check "端口 53 (UDP) 监听状态" "$?"
 
-ss -tlnp | grep -q ':53 ' 2>/dev/null
+ss -tlnp | grep -qE ':53\b' 2>/dev/null
 check "端口 53 (TCP) 监听状态" "$?"
 
 # 检查 3: DNS 解析是否正常
@@ -1178,7 +1201,7 @@ validate_config() {
 # 检查端口 53 是否被占用
 ###############################################################################
 is_port53_in_use() {
-    ss -tlnp 2>/dev/null | grep -q ':53 ' || ss -ulnp 2>/dev/null | grep -q ':53 '
+    ss -tlnp 2>/dev/null | grep -qE ':53\b' || ss -ulnp 2>/dev/null | grep -qE ':53\b'
 }
 
 ###############################################################################
@@ -1291,7 +1314,7 @@ post_install_validation() {
     fi
 
     # 测试 4: 端口监听状态
-    if ss -tlnp | grep -q ":53 "; then
+    if ss -tlnp | grep -qE ":53\b"; then
         printf '%b[通过]%b TCP 端口 53 正在监听\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
@@ -1299,7 +1322,7 @@ post_install_validation() {
         fail=$((fail + 1))
     fi
 
-    if ss -ulnp | grep -q ":53 "; then
+    if ss -ulnp | grep -qE ":53\b"; then
         printf '%b[通过]%b UDP 端口 53 正在监听\n' "${GREEN}" "${NC}"
         pass=$((pass + 1))
     else
