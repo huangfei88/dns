@@ -85,13 +85,14 @@ DRY_RUN="false"
 ###############################################################################
 log() {
     local level="$1"; shift
+    local IFS=' '
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
     printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
-info()  { log "INFO"  "$@"; printf "${GREEN}[INFO]${NC}  %s\n" "$*"; }
-warn()  { log "WARN"  "$@"; printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
-error() { log "ERROR" "$@"; printf "${RED}[ERROR]${NC} %s\n" "$*" >&2; }
+info()  { local IFS=' '; log "INFO"  "$@"; printf '%b[INFO]%b  %s\n' "${GREEN}" "${NC}" "$*"; }
+warn()  { local IFS=' '; log "WARN"  "$@"; printf '%b[WARN]%b  %s\n' "${YELLOW}" "${NC}" "$*"; }
+error() { local IFS=' '; log "ERROR" "$@"; printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$*" >&2; }
 fatal() { error "$@"; exit 1; }
 debug() { log "DEBUG" "$@"; }
 
@@ -108,6 +109,7 @@ cleanup_on_error() {
 
     # 确保系统有可用的 DNS（如果 resolv.conf 被删除但 Unbound 未启动）
     if [[ ! -f /etc/resolv.conf ]] || ! grep -q "nameserver" /etc/resolv.conf 2>/dev/null; then
+        chattr -i /etc/resolv.conf 2>/dev/null || true
         cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
@@ -267,8 +269,6 @@ install_packages() {
         fail2ban
         logrotate
         rsyslog
-        apt-transport-https
-        software-properties-common
         net-tools
         sudo
     )
@@ -301,7 +301,7 @@ net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 65535
 net.core.optmem_max = 2097152
 
-# TCP 调优（用于 DoT/DoH 连接）
+# TCP 调优（用于 DNS TCP 连接和未来 NGINX 反向代理流量）
 net.ipv4.tcp_rmem = 4096 1048576 8388608
 net.ipv4.tcp_wmem = 4096 1048576 8388608
 net.ipv4.tcp_max_syn_backlog = 65536
@@ -434,10 +434,14 @@ setup_dnssec() {
 
     # 下载最新的根提示文件
     local root_hints="/var/lib/unbound/root.hints"
-    if curl -sSf -o "$root_hints" https://www.internic.net/domain/named.root; then
+    local root_hints_tmp
+    root_hints_tmp="$(mktemp)"
+    if curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
+        mv "$root_hints_tmp" "$root_hints"
         info "已下载最新的根提示文件。"
     else
-        warn "无法下载根提示文件，使用系统默认值。"
+        rm -f "$root_hints_tmp"
+        warn "无法下载根提示文件或文件为空，使用系统默认值。"
         cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
     fi
     chown unbound:unbound "$root_hints"
@@ -547,7 +551,6 @@ server:
     # 基础设施缓存
     infra-host-ttl: 900
     infra-cache-numhosts: 50000
-    infra-cache-min-rtt: 50
 
     # --- DNSSEC ---
     auto-trust-anchor-file: "/var/lib/unbound/root.key"
@@ -569,7 +572,6 @@ server:
     harden-glue: yes
     harden-dnssec-stripped: yes
     harden-below-nxdomain: yes
-    harden-referral-path: yes
     harden-algo-downgrade: yes
     harden-large-queries: yes
     harden-short-bufsize: yes
@@ -1005,6 +1007,7 @@ set -euo pipefail
 
 ROOT_HINTS="/var/lib/unbound/root.hints"
 TEMP_FILE=$(mktemp)
+trap 'rm -f "$TEMP_FILE"' EXIT
 
 if curl -sSf -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
     if [[ -s "$TEMP_FILE" ]]; then
@@ -1014,11 +1017,9 @@ if curl -sSf -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
         unbound-control reload 2>/dev/null || systemctl reload unbound
         logger -t "root-hints-update" "根提示文件更新成功"
     else
-        rm -f "$TEMP_FILE"
         logger -t "root-hints-update" "下载的文件为空，跳过更新"
     fi
 else
-    rm -f "$TEMP_FILE"
     logger -t "root-hints-update" "下载根提示文件失败"
 fi
 ROOTHINTS
@@ -1085,6 +1086,8 @@ start_unbound() {
     if systemctl is-active --quiet unbound; then
         info "Unbound 正在运行。"
         # Unbound 启动成功后才更新 resolv.conf
+        # 先移除不可变属性（如果存在）
+        chattr -i /etc/resolv.conf 2>/dev/null || true
         rm -f /etc/resolv.conf
         cat > /etc/resolv.conf <<'EOF'
 # 由 Unbound DNS 安装脚本管理
@@ -1092,7 +1095,9 @@ nameserver 127.0.0.1
 nameserver ::1
 options edns0 trust-ad
 EOF
-        info "已更新 resolv.conf 指向本地 DNS"
+        # 设置不可变属性防止 DHCP 或 networkd 覆盖
+        chattr +i /etc/resolv.conf 2>/dev/null || true
+        info "已更新 resolv.conf 指向本地 DNS（已设置不可变属性）"
     else
         error "Unbound 启动失败。正在检查日志..."
         journalctl -u unbound --no-pager -n 30
