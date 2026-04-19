@@ -29,7 +29,7 @@ IFS=$'\n\t'
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -102,6 +102,8 @@ debug() { log "DEBUG" "$@"; }
 ###############################################################################
 cleanup_on_error() {
     local exit_code=$?
+    # 立即禁用 ERR 陷阱，防止清理函数内部命令失败导致递归调用
+    trap - ERR
     local line_no="${1:-unknown}"
     error "安装在第 ${line_no} 行失败 (退出码: ${exit_code})。"
     error "备份文件位于: ${BACKUP_DIR:-/var/backups}"
@@ -480,7 +482,7 @@ setup_dnssec() {
     if root_hints_tmp="$(mktemp)"; then
         # 立即设置 RETURN 陷阱，确保临时文件在函数退出时被清理
         trap 'rm -f "$root_hints_tmp"' RETURN
-        if curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
+        if curl -sSf --retry 3 --retry-delay 5 -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
             mv "$root_hints_tmp" "$root_hints"
             info "已下载最新的根提示文件。"
         else
@@ -496,8 +498,15 @@ setup_dnssec() {
     chmod 644 "$root_hints"
 
     # 初始化/更新根信任锚
+    # unbound-anchor 退出码: 0=无需更新, 1=已更新, >1=失败
     local anchor_file="/var/lib/unbound/root.key"
-    unbound-anchor -a "$anchor_file" 2>/dev/null || true
+    local anchor_exit=0
+    unbound-anchor -a "$anchor_file" 2>/dev/null || anchor_exit=$?
+    if [[ $anchor_exit -le 1 ]]; then
+        info "DNSSEC 信任锚已就绪 (退出码: ${anchor_exit})。"
+    else
+        warn "unbound-anchor 执行异常 (退出码: ${anchor_exit})，请检查信任锚文件。"
+    fi
     chown unbound:unbound "$anchor_file"
     chmod 644 "$anchor_file"
 
@@ -620,6 +629,9 @@ server:
     val-permissive-mode: no
     val-log-level: 1
 
+    # 限制 DNSSEC 验证失败（bogus）响应的缓存时间
+    val-bogus-ttl: 60
+
     # --- 安全加固 ---
     # 隐藏服务器身份（CIS 要求）
     hide-identity: yes
@@ -684,10 +696,13 @@ server:
     pidfile: "/run/unbound/unbound.pid"
 
     # --- 其他 ---
-    unwanted-reply-threshold: 10000000
+    unwanted-reply-threshold: 10000
     do-not-query-localhost: yes
     ede: yes
     ede-serve-expired: yes
+
+    # 启用扩展统计信息（支持 unbound-stats 脚本获取详细数据）
+    extended-statistics: yes
 EOF
 
     # --- 远程控制配置 ---
@@ -1084,7 +1099,7 @@ ROOT_HINTS="/var/lib/unbound/root.hints"
 TEMP_FILE=$(mktemp) || { logger -t "root-hints-update" "无法创建临时文件"; exit 1; }
 trap 'rm -f "$TEMP_FILE"' EXIT
 
-if curl -sSf -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
+if curl -sSf --retry 3 --retry-delay 5 -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
     if [[ -s "$TEMP_FILE" ]]; then
         mv "$TEMP_FILE" "$ROOT_HINTS"
         chown unbound:unbound "$ROOT_HINTS"
