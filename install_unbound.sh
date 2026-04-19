@@ -265,6 +265,7 @@ install_packages() {
     info "正在更新系统软件包..."
     export DEBIAN_FRONTEND=noninteractive
     # 防止 needrestart 在 Debian 13 上弹出交互式提示
+    # NEEDRESTART_MODE=a 表示自动重启需要重启的服务，无需用户确认
     export NEEDRESTART_MODE=a
 
     apt-get update -qq

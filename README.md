@@ -261,6 +261,8 @@ sudo fail2ban-client status unbound-dns-abuse
 
 3. Configure **Network Security Group (NSG)**:
 
+> ⚠️ **Security Warning**: Always restrict SSH (port 22) access to your own IP address only. Never open SSH to `Any`.
+
 | Priority | Port | Protocol | Source | Description |
 |----------|------|----------|--------|-------------|
 | 100 | 53 | UDP | Any | DNS queries |
@@ -268,8 +270,6 @@ sudo fail2ban-client status unbound-dns-abuse
 | 120 | 853 | TCP | Any | DNS-over-TLS (for NGINX) |
 | 130 | 443 | TCP | Any | DNS-over-HTTPS (for NGINX) |
 | 140 | 22 | TCP | Your IP only | SSH management |
-
-> **Important**: Restrict SSH (port 22) access to your IP address only. Never open SSH to `Any`.
 
 ### Step 2: Initial Server Setup / 初始服务器配置
 
