@@ -330,6 +330,9 @@ vm.swappiness = 10
 # === 文件描述符（支持高并发连接） ===
 fs.file-max = 1048576
 
+# 扩展本地端口范围（支持大量出站 DNS 查询）
+net.ipv4.ip_local_port_range = 1024 65535
+
 # === CIS 基准 - 内核安全加固 ===
 
 # 禁用 IP 转发（CIS 3.1.1）- DNS 服务器不需要路由功能
@@ -390,6 +393,15 @@ kernel.kptr_restrict = 2
 
 # 限制 dmesg 访问
 kernel.dmesg_restrict = 1
+
+# 禁用非特权用户 BPF（CIS 安全加固）
+kernel.unprivileged_bpf_disabled = 1
+
+# 加固 BPF JIT 编译器（CIS 安全加固）
+net.core.bpf_jit_harden = 2
+
+# 限制 ptrace 范围（CIS 1.5.4）
+kernel.yama.ptrace_scope = 2
 SYSCTL
 
     sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 参数可能未成功应用。"
@@ -492,13 +504,21 @@ server:
     access-control: ::0/0 allow
 
     # 拒绝查询私有/伪造地址范围以防止 DNS 重绑定攻击
+    private-address: 0.0.0.0/8
     private-address: 10.0.0.0/8
-    private-address: 172.16.0.0/12
-    private-address: 192.168.0.0/16
-    private-address: 169.254.0.0/16
     private-address: 100.64.0.0/10
     private-address: 127.0.0.0/8
+    private-address: 169.254.0.0/16
+    private-address: 172.16.0.0/12
+    private-address: 192.0.2.0/24
+    private-address: 192.168.0.0/16
+    private-address: 198.18.0.0/15
+    private-address: 198.51.100.0/24
+    private-address: 203.0.113.0/24
+    private-address: 240.0.0.0/4
     private-address: ::1/128
+    private-address: ::ffff:0:0/96
+    private-address: 2001:db8::/32
     private-address: fc00::/7
     private-address: fe80::/10
 
@@ -684,7 +704,9 @@ server:
     include: "/etc/unbound/blocklist.conf"
 
     # 拒绝私有地址的反向查询（防止向根服务器泄露内部网络信息）
+    local-zone: "0.in-addr.arpa." refuse
     local-zone: "10.in-addr.arpa." refuse
+    local-zone: "127.in-addr.arpa." refuse
     local-zone: "16.172.in-addr.arpa." refuse
     local-zone: "17.172.in-addr.arpa." refuse
     local-zone: "18.172.in-addr.arpa." refuse
@@ -703,6 +725,12 @@ server:
     local-zone: "31.172.in-addr.arpa." refuse
     local-zone: "168.192.in-addr.arpa." refuse
     local-zone: "254.169.in-addr.arpa." refuse
+    local-zone: "8.b.d.0.1.0.0.2.ip6.arpa." refuse
+    local-zone: "d.f.ip6.arpa." refuse
+    local-zone: "8.e.f.ip6.arpa." refuse
+    local-zone: "9.e.f.ip6.arpa." refuse
+    local-zone: "a.e.f.ip6.arpa." refuse
+    local-zone: "b.e.f.ip6.arpa." refuse
 EOF
 
     info "RPZ 黑名单配置完成。"
