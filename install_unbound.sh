@@ -66,6 +66,9 @@ readonly RATELIMIT_SLABS=2
 readonly IP_RATELIMIT=100
 readonly IP_RATELIMIT_SLABS=2
 
+# 根提示文件内容验证标记
+readonly ROOT_HINTS_MARKER="ROOT-SERVERS"
+
 # 终端输出颜色
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -471,8 +474,15 @@ setup_unbound_dirs() {
     if command -v aa-status &>/dev/null && aa-status --enabled 2>/dev/null; then
         local apparmor_local="/etc/apparmor.d/local/usr.sbin.unbound"
         if [[ -d /etc/apparmor.d/local ]]; then
-            # 添加自定义路径到 AppArmor 本地覆盖（幂等操作）
-            if [[ ! -f "$apparmor_local" ]] || ! grep -q "$UNBOUND_LOG_DIR" "$apparmor_local" 2>/dev/null; then
+            # 添加自定义路径到 AppArmor 本地覆盖（幂等：检查所有关键规则是否已存在）
+            local needs_update=false
+            if [[ ! -f "$apparmor_local" ]]; then
+                needs_update=true
+            elif ! grep -q "${UNBOUND_LOG_DIR}/" "$apparmor_local" 2>/dev/null || \
+                 ! grep -q "/var/lib/unbound/" "$apparmor_local" 2>/dev/null; then
+                needs_update=true
+            fi
+            if [[ "$needs_update" == "true" ]]; then
                 cat >> "$apparmor_local" <<APPARMOR
 # 由 Unbound 安装脚本添加 - 允许自定义日志和数据目录
 ${UNBOUND_LOG_DIR}/ r,
@@ -507,12 +517,12 @@ setup_dnssec() {
         trap 'rm -f "$root_hints_tmp"' RETURN
         if curl -sSf --retry 3 --retry-delay 5 -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
             # 验证下载的文件确实是根提示文件（至少应包含根服务器记录）
-            if grep -q "ROOT-SERVERS" "$root_hints_tmp" 2>/dev/null; then
+            if grep -q "$ROOT_HINTS_MARKER" "$root_hints_tmp" 2>/dev/null; then
                 mv "$root_hints_tmp" "$root_hints"
                 info "已下载最新的根提示文件。"
             else
                 rm -f "$root_hints_tmp"
-                warn "下载的文件内容无效（未包含 ROOT-SERVERS），使用系统默认值。"
+                warn "下载的文件内容无效（未包含 ${ROOT_HINTS_MARKER}），使用系统默认值。"
                 cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
             fi
         else
@@ -1149,11 +1159,12 @@ STATS
 set -euo pipefail
 
 ROOT_HINTS="/var/lib/unbound/root.hints"
+ROOT_HINTS_MARKER="ROOT-SERVERS"
 TEMP_FILE=$(mktemp) || { logger -t "root-hints-update" "无法创建临时文件"; exit 1; }
 trap 'rm -f "$TEMP_FILE"' EXIT
 
 if curl -sSf --retry 3 --retry-delay 5 -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
-    if [[ -s "$TEMP_FILE" ]] && grep -q "ROOT-SERVERS" "$TEMP_FILE" 2>/dev/null; then
+    if [[ -s "$TEMP_FILE" ]] && grep -q "$ROOT_HINTS_MARKER" "$TEMP_FILE" 2>/dev/null; then
         mv "$TEMP_FILE" "$ROOT_HINTS"
         chown unbound:unbound "$ROOT_HINTS"
         chmod 644 "$ROOT_HINTS"
