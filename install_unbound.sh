@@ -726,6 +726,7 @@ server:
     local-zone: "168.192.in-addr.arpa." refuse
     local-zone: "254.169.in-addr.arpa." refuse
     local-zone: "8.b.d.0.1.0.0.2.ip6.arpa." refuse
+    local-zone: "c.f.ip6.arpa." refuse
     local-zone: "d.f.ip6.arpa." refuse
     local-zone: "8.e.f.ip6.arpa." refuse
     local-zone: "9.e.f.ip6.arpa." refuse
