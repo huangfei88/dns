@@ -84,15 +84,15 @@ DRY_RUN="false"
 
 ###############################################################################
 # 日志辅助函数
-# 修复: 当日志文件不可写时（例如非 root 用户运行），tee 失败不会导致
-# set -e 终止脚本，确保错误信息能正常显示给用户。
+# log() 仅写入日志文件；终端输出由 info/warn/error 各自处理。
+# 当日志文件不可写时（例如非 root 用户运行），静默忽略写入失败，
+# 终端的彩色输出仍正常显示给用户。
 ###############################################################################
 log() {
     local level="$1"; shift
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
-    printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*" | tee -a "$LOG_FILE" 2>/dev/null || \
-        printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*"
+    printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 info()  { log "INFO"  "$@"; printf "${GREEN}[INFO]${NC}  %s\n" "$*"; }
 warn()  { log "WARN"  "$@"; printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
