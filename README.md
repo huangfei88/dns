@@ -374,10 +374,10 @@ dig @<server-ip> example.com A | grep "Query time"
 
 DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are provided by NGINX as a reverse proxy in front of Unbound. This section provides complete, production-ready configuration.
 
-> The firewall already has ports 853 and 443 open (configured by the install script). If you do not plan to use DoT/DoH, you can remove these rules:
+> The install script does **not** open ports 853 or 443 (it follows the principle of least privilege). You need to open them manually before starting NGINX:
 > ```bash
-> sudo ufw delete allow 853/tcp
-> sudo ufw delete allow 443/tcp
+> sudo ufw allow 853/tcp
+> sudo ufw allow 443/tcp
 > ```
 
 #### 6.1 Prerequisites / 前置条件
@@ -714,9 +714,10 @@ echo | openssl s_client -connect dns.example.com:443 -servername dns.example.com
 
 **Expected results:**
 - DoT queries via `kdig` should return valid DNS responses
-- DoH POST requests should return binary DNS response data
-- DoH JSON queries should return a JSON object with DNS answer data
+- DoH POST/GET requests should return binary DNS response data (wire format per RFC 8484)
 - TLS certificates should show your domain name and valid dates
+
+> **Note**: Unbound's native DoH endpoint only supports RFC 8484 wire format (`application/dns-message`). JSON format (`application/dns-json`) is **not** supported.
 
 #### 6.8 Configure Android / iOS Private DNS / 配置客户端私有 DNS
 
