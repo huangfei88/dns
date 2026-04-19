@@ -457,8 +457,10 @@ net.core.bpf_jit_harden = 2
 # 限制 ptrace 范围（CIS 1.5.4）
 kernel.yama.ptrace_scope = 2
 
-# 禁用 Magic SysRq 键（CIS 1.5.2）
-kernel.sysrq = 0
+# 限制 Magic SysRq 键（CIS 1.5.2）- 仅保留安全的紧急恢复功能
+# 值 244 = 4(keyboard)+16(sync)+32(remount-ro)+64(signal)+128(reboot)
+# 禁用: console-loglevel(2), debug-dumps(8), nice-RT(256)
+kernel.sysrq = 244
 
 # 限制非特权用户使用性能计数器（CIS 安全加固）
 kernel.perf_event_paranoid = 3
@@ -637,12 +639,12 @@ server:
     private-address: 127.0.0.0/8
     private-address: 169.254.0.0/16
     private-address: 172.16.0.0/12
+    private-address: 192.0.0.0/24
     private-address: 192.0.2.0/24
     private-address: 192.168.0.0/16
     private-address: 198.18.0.0/15
     private-address: 198.51.100.0/24
     private-address: 203.0.113.0/24
-    private-address: 192.0.0.0/24
     private-address: 240.0.0.0/4
     private-address: 255.255.255.255/32
     private-address: ::1/128
