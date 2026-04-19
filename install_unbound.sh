@@ -674,6 +674,7 @@ server:
     private-address: 192.168.0.0/16
     private-address: 198.18.0.0/15
     private-address: 198.51.100.0/24
+    private-address: 192.88.99.0/24
     private-address: 203.0.113.0/24
     private-address: 240.0.0.0/4
     private-address: 255.255.255.255/32
@@ -682,6 +683,7 @@ server:
     private-address: 2001:db8::/32
     private-address: fc00::/7
     private-address: fe80::/10
+    private-address: 100::/64
 
     # --- 协议设置 ---
     do-ip4: yes
@@ -1064,6 +1066,9 @@ configure_logrotate() {
 
     cat > /etc/logrotate.d/unbound <<'EOF'
 /var/log/unbound/unbound.log {
+    # Debian 13: 当日志目录属于非 root 用户时需要 su 指令，
+    # 避免 logrotate 因目录权限不安全而跳过轮转
+    su unbound unbound
     daily
     rotate 365
     compress
