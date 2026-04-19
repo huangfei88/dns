@@ -94,7 +94,7 @@ log() {
     printf "[%s] [%-5s] %s\n" "$ts" "$level" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 info()  { local IFS=' '; log "INFO"  "$@"; printf '%b[INFO]%b  %s\n' "${GREEN}" "${NC}" "$*"; }
-warn()  { local IFS=' '; log "WARN"  "$@"; printf '%b[WARN]%b  %s\n' "${YELLOW}" "${NC}" "$*"; }
+warn()  { local IFS=' '; log "WARN"  "$@"; printf '%b[WARN]%b  %s\n' "${YELLOW}" "${NC}" "$*" >&2; }
 error() { local IFS=' '; log "ERROR" "$@"; printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$*" >&2; }
 fatal() { error "$@"; exit 1; }
 debug() { log "DEBUG" "$@"; }
@@ -105,8 +105,8 @@ debug() { log "DEBUG" "$@"; }
 ###############################################################################
 cleanup_on_error() {
     local exit_code=$?
-    # 立即禁用 ERR 陷阱，防止清理函数内部命令失败导致递归调用
-    trap - ERR
+    # 立即禁用所有陷阱，防止清理函数内部命令失败导致递归调用
+    trap - ERR INT TERM
     local line_no="${1:-unknown}"
     error "安装在第 ${line_no} 行失败 (退出码: ${exit_code})。"
     error "备份文件位于: ${BACKUP_DIR:-/var/backups}"
@@ -126,6 +126,8 @@ DNSEOF
     fi
 
     error "请检查日志文件并手动排查问题。"
+    # 确保脚本在信号（INT/TERM）或错误（ERR）后正确退出
+    exit "${exit_code:-1}"
 }
 
 ###############################################################################
@@ -857,6 +859,11 @@ server:
     local-zone: "31.172.in-addr.arpa." refuse
     local-zone: "168.192.in-addr.arpa." refuse
     local-zone: "254.169.in-addr.arpa." refuse
+    local-zone: "2.0.192.in-addr.arpa." refuse
+    local-zone: "100.51.198.in-addr.arpa." refuse
+    local-zone: "113.0.203.in-addr.arpa." refuse
+    local-zone: "18.198.in-addr.arpa." refuse
+    local-zone: "19.198.in-addr.arpa." refuse
     local-zone: "8.b.d.0.1.0.0.2.ip6.arpa." refuse
     local-zone: "c.f.ip6.arpa." refuse
     local-zone: "d.f.ip6.arpa." refuse
@@ -1622,11 +1629,6 @@ main() {
     # TERM: 收到终止信号时触发清理
     trap 'cleanup_on_error $LINENO' ERR INT TERM
 
-    # 初始化日志文件
-    mkdir -p "$(dirname "$LOG_FILE")"
-    touch "$LOG_FILE"
-    chmod 640 "$LOG_FILE"
-
     echo ""
     info "╔══════════════════════════════════════════════════════════════╗"
     info "║   企业级 Unbound DNS 服务器安装程序 v${SCRIPT_VERSION}            ║"
@@ -1662,6 +1664,11 @@ main() {
         info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
     fi
+
+    # 初始化日志文件（仅在实际安装模式下，dry-run 模式无需 root 权限）
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
+    chmod 640 "$LOG_FILE"
 
     # 执行安装步骤
     preflight_checks
