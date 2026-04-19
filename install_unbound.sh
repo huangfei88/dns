@@ -109,7 +109,10 @@ cleanup_on_error() {
 
     # 确保系统有可用的 DNS（如果 resolv.conf 被删除但 Unbound 未启动）
     if [[ ! -f /etc/resolv.conf ]] || ! grep -q "nameserver" /etc/resolv.conf 2>/dev/null; then
-        chattr -i /etc/resolv.conf 2>/dev/null || true
+        # 移除不可变属性后再写入
+        if [[ -f /etc/resolv.conf ]]; then
+            chattr -i /etc/resolv.conf 2>/dev/null || true
+        fi
         cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
@@ -435,8 +438,8 @@ setup_dnssec() {
     # 下载最新的根提示文件
     local root_hints="/var/lib/unbound/root.hints"
     local root_hints_tmp
-    root_hints_tmp="$(mktemp)"
-    if curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
+    root_hints_tmp="$(mktemp)" || { warn "无法创建临时文件，使用系统默认根提示。"; cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true; root_hints_tmp=""; }
+    if [[ -n "$root_hints_tmp" ]] && curl -sSf -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
         mv "$root_hints_tmp" "$root_hints"
         info "已下载最新的根提示文件。"
     else
@@ -1006,7 +1009,7 @@ STATS
 set -euo pipefail
 
 ROOT_HINTS="/var/lib/unbound/root.hints"
-TEMP_FILE=$(mktemp)
+TEMP_FILE=$(mktemp) || { logger -t "root-hints-update" "无法创建临时文件"; exit 1; }
 trap 'rm -f "$TEMP_FILE"' EXIT
 
 if curl -sSf -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
