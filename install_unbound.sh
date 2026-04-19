@@ -29,7 +29,7 @@ IFS=$'\n\t'
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="1.5.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -65,6 +65,9 @@ readonly RATELIMIT=1000
 readonly RATELIMIT_SLABS=2
 readonly IP_RATELIMIT=100
 readonly IP_RATELIMIT_SLABS=2
+
+# 根提示文件内容验证标记
+readonly ROOT_HINTS_MARKER="ROOT-SERVERS"
 
 # 终端输出颜色
 readonly RED='\033[0;31m'
@@ -467,6 +470,36 @@ setup_unbound_dirs() {
     chown unbound:unbound "${UNBOUND_LOG_DIR}/unbound.log"
     chmod 640 "${UNBOUND_LOG_DIR}/unbound.log"
 
+    # 处理 AppArmor：Debian 13 默认启用 AppArmor，需确保自定义路径被允许
+    if command -v aa-status &>/dev/null && aa-status --enabled 2>/dev/null; then
+        local apparmor_local="/etc/apparmor.d/local/usr.sbin.unbound"
+        if [[ -d /etc/apparmor.d/local ]]; then
+            # 添加自定义路径到 AppArmor 本地覆盖（幂等：检查所有关键规则是否已存在）
+            local needs_update=false
+            if [[ ! -f "$apparmor_local" ]]; then
+                needs_update=true
+            elif ! grep -q "${UNBOUND_LOG_DIR}/" "$apparmor_local" 2>/dev/null || \
+                 ! grep -q "/var/lib/unbound/" "$apparmor_local" 2>/dev/null; then
+                needs_update=true
+            fi
+            if [[ "$needs_update" == "true" ]]; then
+                cat >> "$apparmor_local" <<APPARMOR
+# 由 Unbound 安装脚本添加 - 允许自定义日志和数据目录
+${UNBOUND_LOG_DIR}/ r,
+${UNBOUND_LOG_DIR}/** rw,
+/var/lib/unbound/ r,
+/var/lib/unbound/** rw,
+APPARMOR
+                # 重新加载 AppArmor 配置
+                if apparmor_parser -r /etc/apparmor.d/usr.sbin.unbound 2>/dev/null; then
+                    info "AppArmor 配置已更新以允许 Unbound 自定义路径。"
+                else
+                    warn "AppArmor 配置重载失败，可能需要手动检查。"
+                fi
+            fi
+        fi
+    fi
+
     info "目录配置完成。"
 }
 
@@ -483,8 +516,15 @@ setup_dnssec() {
         # 立即设置 RETURN 陷阱，确保临时文件在函数退出时被清理
         trap 'rm -f "$root_hints_tmp"' RETURN
         if curl -sSf --retry 3 --retry-delay 5 -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
-            mv "$root_hints_tmp" "$root_hints"
-            info "已下载最新的根提示文件。"
+            # 验证下载的文件确实是根提示文件（至少应包含根服务器记录）
+            if grep -q "$ROOT_HINTS_MARKER" "$root_hints_tmp" 2>/dev/null; then
+                mv "$root_hints_tmp" "$root_hints"
+                info "已下载最新的根提示文件。"
+            else
+                rm -f "$root_hints_tmp"
+                warn "下载的文件内容无效（未包含 ${ROOT_HINTS_MARKER}），使用系统默认值。"
+                cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
+            fi
         else
             rm -f "$root_hints_tmp"
             warn "无法下载根提示文件或文件为空，使用系统默认值。"
@@ -618,6 +658,10 @@ server:
     infra-host-ttl: 900
     infra-cache-numhosts: 50000
 
+    # 优先使用响应速度较快的权威服务器（降低解析延迟）
+    fast-server-permil: 750
+    fast-server-num: 3
+
     # --- DNSSEC ---
     # 显式声明模块链，确保 DNSSEC 验证在迭代解析之前执行
     module-config: "validator iterator"
@@ -631,6 +675,9 @@ server:
 
     # 限制 DNSSEC 验证失败（bogus）响应的缓存时间
     val-bogus-ttl: 60
+
+    # 限制 DNSSEC 验证重启次数，防止 CPU 耗尽攻击 (Unbound 1.19+)
+    val-max-restart: 5
 
     # --- 安全加固 ---
     # 隐藏服务器身份（CIS 要求）
@@ -725,6 +772,26 @@ EOF
 
     # 生成 unbound-control 密钥
     unbound-control-setup 2>/dev/null || warn "unbound-control-setup 存在警告"
+
+    # 验证证书文件是否成功生成（control-use-cert: yes 要求证书存在）
+    local cert_files=(
+        /etc/unbound/unbound_server.key
+        /etc/unbound/unbound_server.pem
+        /etc/unbound/unbound_control.key
+        /etc/unbound/unbound_control.pem
+    )
+    local certs_ok=true
+    for cf in "${cert_files[@]}"; do
+        if [[ ! -f "$cf" ]]; then
+            warn "证书文件缺失: $cf"
+            certs_ok=false
+        fi
+    done
+    if [[ "$certs_ok" != "true" ]]; then
+        warn "远程控制证书不完整，切换为无证书模式以避免 Unbound 启动失败。"
+        sed -i 's/control-use-cert: yes/control-use-cert: no/' "$UNBOUND_CONF_DIR/02-remote-control.conf"
+    fi
+
     info "Unbound 配置生成完成。"
 }
 
@@ -809,13 +876,8 @@ configure_firewall() {
     ufw allow 53/tcp >/dev/null 2>&1
     ufw allow 53/udp >/dev/null 2>&1
 
-    # DNS-over-TLS (端口 853) - 预留给后续安装的 NGINX 反向代理
-    # 如未安装 NGINX，可安全移除此规则: ufw delete allow 853/tcp
-    ufw allow 853/tcp >/dev/null 2>&1
-
-    # DNS-over-HTTPS (端口 443) - 预留给后续安装的 NGINX 反向代理
-    # 如未安装 NGINX，可安全移除此规则: ufw delete allow 443/tcp
-    ufw allow 443/tcp >/dev/null 2>&1
+    # 注意: DOT (端口 853) 和 DoH (端口 443) 由单独安装的 NGINX 反向代理处理。
+    # NGINX 安装脚本应自行开放这些端口。遵循最小权限原则，此处不预先开放。
 
     # 启用日志记录（中等级别用于审计）
     ufw logging medium >/dev/null 2>&1
@@ -824,7 +886,8 @@ configure_firewall() {
     ufw --force enable >/dev/null 2>&1
 
     info "UFW 防火墙已配置并激活。"
-    info "已开放端口: SSH(22/tcp-限速), DNS(53/tcp+udp), DoT(853/tcp-NGINX), DoH(443/tcp-NGINX)"
+    info "已开放端口: SSH(22/tcp-限速), DNS(53/tcp+udp)"
+    info "注意: DoT(853) 和 DoH(443) 端口将由 NGINX 安装脚本开放。"
 }
 
 ###############################################################################
@@ -1096,18 +1159,19 @@ STATS
 set -euo pipefail
 
 ROOT_HINTS="/var/lib/unbound/root.hints"
+ROOT_HINTS_MARKER="ROOT-SERVERS"
 TEMP_FILE=$(mktemp) || { logger -t "root-hints-update" "无法创建临时文件"; exit 1; }
 trap 'rm -f "$TEMP_FILE"' EXIT
 
 if curl -sSf --retry 3 --retry-delay 5 -o "$TEMP_FILE" https://www.internic.net/domain/named.root; then
-    if [[ -s "$TEMP_FILE" ]]; then
+    if [[ -s "$TEMP_FILE" ]] && grep -q "$ROOT_HINTS_MARKER" "$TEMP_FILE" 2>/dev/null; then
         mv "$TEMP_FILE" "$ROOT_HINTS"
         chown unbound:unbound "$ROOT_HINTS"
         chmod 644 "$ROOT_HINTS"
         unbound-control reload 2>/dev/null || systemctl reload unbound
         logger -t "root-hints-update" "根提示文件更新成功"
     else
-        logger -t "root-hints-update" "下载的文件为空，跳过更新"
+        logger -t "root-hints-update" "下载的文件为空或内容无效，跳过更新"
     fi
 else
     logger -t "root-hints-update" "下载根提示文件失败"
@@ -1414,8 +1478,12 @@ print_summary() {
 ║    • DNS (UDP/TCP):  ${DNS_PORT}                                                    ║
 ║    • 远程控制:       8953 (仅限本地)                                         ║
 ║                                                                            ║
+║  防火墙已开放端口:                                                           ║
+║    • SSH:  22/tcp (速率限制)                                                 ║
+║    • DNS:  53/tcp + 53/udp                                                  ║
+║                                                                            ║
 ║  注意: DOT (端口 853) 和 DoH (端口 443) 由 NGINX 反向代理提供               ║
-║        请单独安装和配置 NGINX 以启用 DOT/DoH 功能                            ║
+║        请单独安装 NGINX 并由其安装脚本开放 853/443 端口                       ║
 ║                                                                            ║
 ║  配置文件:                                                                  ║
 ║    • 主配置:        ${UNBOUND_MAIN_CONF}                           ║
@@ -1432,9 +1500,9 @@ print_summary() {
 ║    • 检查配置:      unbound-checkconf                                      ║
 ║                                                                            ║
 ║  安全特性:                                                                  ║
-║    ✓ DNSSEC 验证已启用                                                      ║
+║    ✓ DNSSEC 验证已启用（含 val-max-restart 防护）                            ║
 ║    ✓ 速率限制（每 IP 和全局）                                                ║
-║    ✓ UFW 防火墙（基于 nftables 后端）                                       ║
+║    ✓ UFW 防火墙（基于 nftables 后端，最小权限端口开放）                       ║
 ║    ✓ Fail2Ban DNS 滥用防护                                                  ║
 ║    ✓ Systemd 沙箱隔离（ProtectSystem, NoNewPrivileges 等）                  ║
 ║    ✓ QNAME 最小化 (RFC 7816)                                               ║
@@ -1445,6 +1513,7 @@ print_summary() {
 ║    ✓ CIS 基准内核安全加固                                                    ║
 ║    ✓ 登录横幅和核心转储限制                                                  ║
 ║    ✓ 90 天日志保留                                                           ║
+║    ✓ 快速服务器选择优化                                                      ║
 ║                                                                            ║
 ║  备份位置: ${BACKUP_DIR}                         ║
 ║  安装日志: ${LOG_FILE}                                    ║
