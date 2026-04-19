@@ -6,7 +6,7 @@
 # 功能特性:
 #   - DNSSEC 验证及自动根信任锚管理
 #   - 针对低延迟公共 DNS 的高性能调优（仅端口 53 UDP/TCP）
-#   - CIS 基准和 PCI-DSS 合规加固（内核、SSH、文件系统、服务）
+#   - CIS 基准和 PCI-DSS 合规加固（内核、文件系统、服务）
 #   - 速率限制、访问控制和防放大攻击
 #   - Systemd 服务沙箱隔离
 #   - UFW 防火墙（基于 nftables 后端）
@@ -237,11 +237,7 @@ backup_existing() {
         cp -a /etc/sysctl.d "$BACKUP_DIR/etc_sysctl.d" 2>/dev/null || true
     fi
 
-    # 备份 SSH 配置
-    if [[ -f /etc/ssh/sshd_config ]]; then
-        cp -a /etc/ssh/sshd_config "$BACKUP_DIR/sshd_config" 2>/dev/null || true
-        info "已备份 /etc/ssh/sshd_config"
-    fi
+
 }
 
 ###############################################################################
@@ -1408,7 +1404,6 @@ print_summary() {
 ║    ✓ deny-any 已启用                                                        ║
 ║    ✓ DNS 性能内核调优                                                        ║
 ║    ✓ CIS 基准内核安全加固                                                    ║
-║    ✓ SSH 安全加固                                                            ║
 ║    ✓ 登录横幅和核心转储限制                                                  ║
 ║    ✓ 90 天日志保留                                                           ║
 ║                                                                            ║
@@ -1418,81 +1413,6 @@ print_summary() {
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 EOF
-}
-
-###############################################################################
-# CIS 基准 - SSH 安全加固
-###############################################################################
-harden_ssh() {
-    info "正在应用 SSH 安全加固（CIS 基准）..."
-
-    local sshd_config_dir="/etc/ssh/sshd_config.d"
-
-    # 使用独立配置文件以避免修改主配置
-    mkdir -p "$sshd_config_dir"
-
-    cat > "${sshd_config_dir}/99-cis-hardening.conf" <<'EOF'
-# =============================================================================
-# SSH 安全加固 - CIS 基准合规配置
-# =============================================================================
-
-# 注意: Protocol 2 在现代 OpenSSH (7.6+) 中已移除 SSH v1 支持，
-# 该指令已废弃，无需显式声明。
-
-# 禁止 root 使用密码登录（CIS 5.2.10）- 仅允许密钥认证
-PermitRootLogin prohibit-password
-
-# 最大认证尝试次数（CIS 5.2.6）
-MaxAuthTries 4
-
-# 登录超时时间（CIS 5.2.16）
-LoginGraceTime 60
-
-# 空闲超时设置（CIS 5.2.13）
-ClientAliveInterval 300
-ClientAliveCountMax 3
-
-# 禁用空密码（CIS 5.2.9）
-PermitEmptyPasswords no
-
-# 禁用主机认证（CIS 5.2.7）
-HostbasedAuthentication no
-
-# 忽略用户已知主机文件中的 rhosts（CIS 5.2.8）
-IgnoreRhosts yes
-
-# 日志级别（CIS 5.2.3）
-LogLevel VERBOSE
-
-# 最大并发未认证连接数（CIS 5.2.19）
-MaxStartups 10:30:60
-
-# 最大会话数
-MaxSessions 10
-
-# 禁用 X11 转发（CIS 5.2.5）
-X11Forwarding no
-
-# 禁用远程 TCP 转发，允许本地转发用于管理
-AllowTcpForwarding local
-
-# 登录前警告横幅（CIS 5.2.18）
-Banner /etc/issue.net
-
-# 使用强加密算法
-Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
-KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256
-EOF
-
-    # 验证 SSH 配置有效性
-    if sshd -t 2>/dev/null; then
-        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
-        info "SSH 安全加固已应用。"
-    else
-        warn "SSH 配置验证失败，已回滚更改。"
-        rm -f "${sshd_config_dir}/99-cis-hardening.conf"
-    fi
 }
 
 ###############################################################################
@@ -1609,12 +1529,11 @@ main() {
         info "  11. 配置日志轮转（90 天保留）"
         info "  12. 应用 Systemd 服务安全加固"
         info "  13. 创建监控和健康检查脚本及 systemd 定时器"
-        info "  14. SSH 安全加固（CIS 基准）"
-        info "  15. 禁用不必要的服务（CIS 基准）"
-        info "  16. 配置登录横幅"
-        info "  17. 验证配置文件语法"
-        info "  18. 启动 Unbound 服务"
-        info "  19. 运行安装后验证测试"
+        info "  14. 禁用不必要的服务（CIS 基准）"
+        info "  15. 配置登录横幅"
+        info "  16. 验证配置文件语法"
+        info "  17. 启动 Unbound 服务"
+        info "  18. 运行安装后验证测试"
         info ""
         info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
@@ -1634,7 +1553,6 @@ main() {
     configure_logrotate
     harden_systemd_service
     create_monitoring_scripts
-    harden_ssh
     disable_unnecessary_services
     configure_login_banners
     validate_config

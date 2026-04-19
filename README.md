@@ -28,7 +28,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - Conservative cache sizes for low-memory environments
 
 ### Compliance
-- **CIS Benchmark** hardening (kernel, SSH, filesystem, services, login banners, core dump restrictions)
+- **CIS Benchmark** hardening (kernel, filesystem, services, login banners, core dump restrictions)
 - **PCI-DSS** compliance (TLS 1.2+, audit logging, 90-day log retention, access control)
 - Comprehensive audit logging
 - Login banners and access restrictions
@@ -139,7 +139,6 @@ Note:
 | `/etc/unbound/unbound.conf.d/04-blocklist.conf` | Response policy / domain blocklist |
 | `/etc/unbound/blocklist.conf` | Custom domain blocklist entries |
 | `/etc/sysctl.d/99-unbound-dns.conf` | DNS performance + CIS kernel security tuning |
-| `/etc/ssh/sshd_config.d/99-cis-hardening.conf` | SSH CIS hardening configuration |
 | `/etc/security/limits.d/99-disable-coredumps.conf` | Core dump restrictions |
 
 ## Management Commands
@@ -197,7 +196,6 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 ### CIS Benchmark Controls
 - [x] Kernel hardening (IP forwarding, source routing, ICMP redirects, SYN cookies)
 - [x] Core dump restrictions
-- [x] SSH hardening (MaxAuthTries, strong ciphers, no X11 forwarding, login banner)
 - [x] File permission hardening
 - [x] Unnecessary services disabled (avahi, cups, rpcbind, etc.)
 - [x] Login banners (pre-login and post-login)
@@ -206,7 +204,7 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 
 ### PCI-DSS Requirements
 - [x] TLS 1.2+ for encrypted DNS via NGINX proxy (Requirement 4.1)
-- [x] Strong cipher suites (SSH and DNS transport)
+- [x] Strong cipher suites (DNS transport)
 - [x] Comprehensive audit logging (Requirement 10)
 - [x] 90-day log retention (Requirement 10.7)
 - [x] Firewall with default-deny policy (Requirement 1)
@@ -308,7 +306,7 @@ The script will automatically:
 4. Set up Unbound with optimized configuration for the VM size
 5. Configure UFW firewall with default-deny policy
 6. Set up Fail2Ban for DNS abuse protection
-7. Apply systemd sandboxing and SSH hardening
+7. Apply systemd sandboxing
 8. Create monitoring scripts and maintenance timers
 9. Validate configuration and start the service
 10. Run post-installation health checks
