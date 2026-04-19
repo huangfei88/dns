@@ -226,6 +226,7 @@ preflight_checks() {
 backup_existing() {
     info "正在创建备份目录: $BACKUP_DIR"
     mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
 
     if [[ -d /etc/unbound ]]; then
         cp -a /etc/unbound "$BACKUP_DIR/etc_unbound" 2>/dev/null || true
@@ -725,7 +726,10 @@ server:
     ip-ratelimit-slabs: ${IP_RATELIMIT_SLABS}
     ip-ratelimit-size: 4m
 
-    # --- 日志记录（PCI-DSS: 全面审计日志）---
+    # --- 日志记录（PCI-DSS 合规审计日志）---
+    # 注意: log-queries/log-replies 设为 no 以避免公共 DNS 场景下的性能和存储开销。
+    # 安全相关事件（SERVFAIL、本地策略动作、速率限制违规）仍会被完整记录。
+    # 如需完整查询审计，可将 log-queries/log-replies 设为 yes。
     use-syslog: no
     logfile: "${UNBOUND_LOG_DIR}/unbound.log"
     verbosity: 1
@@ -1222,12 +1226,12 @@ anchor_exit=0
 if [[ $anchor_exit -eq 0 ]]; then
     logger -t "trust-anchor-update" "DNSSEC 信任锚无需更新"
 elif [[ $anchor_exit -eq 1 ]]; then
-    logger -t "trust-anchor-update" "DNSSEC 信任锚已更新"
+    logger -t "trust-anchor-update" "DNSSEC 信任锚已更新，正在重载 Unbound..."
+    if ! systemctl reload unbound 2>/dev/null; then
+        logger -t "trust-anchor-update" "Unbound 重载失败，服务可能未运行"
+    fi
 else
     logger -t "trust-anchor-update" "unbound-anchor 执行失败 (退出码: $anchor_exit)"
-fi
-if ! systemctl reload unbound 2>/dev/null; then
-    logger -t "trust-anchor-update" "Unbound 重载失败，服务可能未运行"
 fi
 logger -t "trust-anchor-update" "DNSSEC 信任锚更新任务完成"
 TRUSTANCHOR
