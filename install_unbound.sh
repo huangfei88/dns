@@ -1295,6 +1295,7 @@ Type=oneshot
 ExecStart=/usr/local/bin/update-root-hints
 EOF
     chmod 0644 /etc/systemd/system/update-root-hints.service
+    chown root:root /etc/systemd/system/update-root-hints.service
 
     cat > /etc/systemd/system/update-root-hints.timer <<'EOF'
 [Unit]
@@ -1309,6 +1310,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
     chmod 0644 /etc/systemd/system/update-root-hints.timer
+    chown root:root /etc/systemd/system/update-root-hints.timer
 
     systemctl daemon-reload
     systemctl enable --now update-root-hints.timer 2>/dev/null || true
@@ -1350,6 +1352,7 @@ Type=oneshot
 ExecStart=/usr/local/bin/update-trust-anchor
 EOF
     chmod 0644 /etc/systemd/system/update-trust-anchor.service
+    chown root:root /etc/systemd/system/update-trust-anchor.service
 
     cat > /etc/systemd/system/update-trust-anchor.timer <<'EOF'
 [Unit]
@@ -1364,6 +1367,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
     chmod 0644 /etc/systemd/system/update-trust-anchor.timer
+    chown root:root /etc/systemd/system/update-trust-anchor.timer
 
     systemctl daemon-reload
     systemctl enable --now update-trust-anchor.timer 2>/dev/null || true
