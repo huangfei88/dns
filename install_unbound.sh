@@ -291,12 +291,6 @@ backup_existing() {
         cp -a /etc/resolv.conf "$BACKUP_DIR/resolv.conf" 2>/dev/null || true
         info "已备份 /etc/resolv.conf"
     fi
-
-    # 备份 SSH 配置
-    if [[ -d /etc/ssh ]]; then
-        cp -a /etc/ssh "$BACKUP_DIR/etc_ssh" 2>/dev/null || true
-        info "已备份 /etc/ssh"
-    fi
 }
 
 ###############################################################################
@@ -380,7 +374,9 @@ net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_max_orphans = 65536
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_timestamps = 0
+# TCP 时间戳必须启用：tcp_tw_reuse 依赖时间戳判断 TIME-WAIT 重用安全性，
+# 且 PAWS（防回绕序列号保护）也需要时间戳。现代安全指南不再建议禁用。
+net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_no_metrics_save = 1
 
@@ -1276,7 +1272,7 @@ EOF
 
 # === PCI-DSS Req 10.2.5 / CIS 4.1.3.2: sudo/su 使用 ===
 -w /var/log/sudo.log -p wa -k actions
--a always,exit -F arch=b64 -C euid!=uid -F euid=0 -Fauid>=1000 -F auid!=4294967295 -S execve -k user_emulation
+-a always,exit -F arch=b64 -C euid!=uid -F euid=0 -F auid>=1000 -F auid!=4294967295 -S execve -k user_emulation
 
 # === PCI-DSS Req 10.2.2 / CIS 4.1.3.10: 特权命令执行 ===
 -a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
@@ -1598,7 +1594,8 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/unbound
 PrivateTmp=yes
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX 需要用于 systemctl reload unbound（通过 D-Bus 与 systemd 通信）
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE
@@ -1949,7 +1946,6 @@ print_summary() {
 ║    ✓ deny-any 已启用                                                        ║
 ║    ✓ DNS 性能内核调优                                                        ║
 ║    ✓ CIS 基准内核安全加固                                                    ║
-║    ✓ SSH 安全加固（CIS 基准 5.2，强加密算法，禁用密码认证）                    ║
 ║    ✓ 登录横幅和核心转储限制                                                  ║
 ║    ✓ 365 天日志保留（PCI-DSS v4.0 Req 10.7.1）                              ║
 ║    ✓ auditd 内核审计（CIS §4 / PCI-DSS Req 10 — 全面系统审计）              ║
@@ -2038,130 +2034,6 @@ EOF
 }
 
 ###############################################################################
-# CIS 基准 - SSH 服务器安全加固 (CIS 5.2)
-###############################################################################
-configure_ssh_hardening() {
-    info "正在应用 SSH 安全加固（CIS 基准 5.2）..."
-
-    # 使用 sshd_config.d drop-in 目录（Debian 13 默认支持 Include），
-    # 避免直接修改主 sshd_config 文件，保持升级兼容性。
-    mkdir -p /etc/ssh/sshd_config.d
-
-    cat > /etc/ssh/sshd_config.d/99-cis-hardening.conf <<'EOF'
-# =============================================================================
-# CIS 基准 SSH 安全加固 (CIS 5.2)
-# 由 Unbound DNS 安装脚本自动配置
-# =============================================================================
-
-# CIS 5.2.3 - 日志级别（VERBOSE 记录密钥指纹等安全事件，满足审计要求）
-
-# CIS 5.2.4 - 禁用 X11 转发（DNS 服务器不需要图形转发）
-X11Forwarding no
-
-# CIS 5.2.5 - 限制最大认证尝试次数
-MaxAuthTries 4
-
-# CIS 5.2.6 - 忽略 .rhosts 文件
-IgnoreRhosts yes
-
-# CIS 5.2.7 - 禁用基于主机的认证
-HostbasedAuthentication no
-
-# CIS 5.2.8 - 禁止 root 直接 SSH 登录（使用 sudo 提权）
-PermitRootLogin no
-
-# CIS 5.2.9 - 禁止空密码登录
-PermitEmptyPasswords no
-
-# CIS 5.2.11 - SSH 空闲超时（300 秒 × 3 次 = 最长 15 分钟空闲后断开）
-ClientAliveInterval 300
-ClientAliveCountMax 3
-
-# CIS 5.2.12 - 登录宽限期（60 秒内未完成认证则断开）
-LoginGraceTime 60
-
-# CIS 5.2.13 - 显示 SSH 登录横幅
-Banner /etc/issue.net
-
-# CIS 5.2.14 - 使用强加密算法（禁用弱算法）
-Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
-KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
-HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
-
-# CIS 5.2.15 - 禁用 TCP 转发（DNS 服务器不需要 SSH 隧道）
-AllowTcpForwarding no
-
-# 禁用 SSH Agent 转发
-AllowAgentForwarding no
-
-# 最大并发会话数（CIS: ≤ 4 用于高安全环境）
-MaxSessions 4
-
-# 最大并发未认证连接数（防暴力破解）
-MaxStartups 10:30:60
-
-# 禁止用户设置环境变量
-PermitUserEnvironment no
-
-# 禁用 GSSAPI 认证（DNS 服务器不需要 Kerberos 认证）
-GSSAPIAuthentication no
-
-# 禁用 SSH 隧道（DNS 服务器不需要 VPN 隧道功能）
-PermitTunnel no
-
-# 使用 PAM 进行认证
-UsePAM yes
-
-# 禁用 DNS 反向查找（防止因 DNS 超时导致 SSH 登录延迟）
-UseDNS no
-
-# PCI-DSS Req 8.3 / CIS 5.2 - 禁用密码认证，强制使用密钥认证
-# 警告: 启用此选项前必须确保已配置 SSH 公钥，否则将无法登录！
-PasswordAuthentication no
-EOF
-    chmod 0600 /etc/ssh/sshd_config.d/99-cis-hardening.conf
-    chown root:root /etc/ssh/sshd_config.d/99-cis-hardening.conf
-
-    # 在禁用密码认证之前验证系统中至少有一个用户配置了 SSH 公钥。
-    # 若未找到有效公钥则回滚 PasswordAuthentication 设置，防止管理员被锁定。
-    local has_authorized_keys=false
-    while IFS=: read -r _ _ _ _ _ homedir _; do
-        local keyfile="${homedir}/.ssh/authorized_keys"
-        if [[ -f "$keyfile" ]] && [[ -s "$keyfile" ]]; then
-            has_authorized_keys=true
-            break
-        fi
-    done < /etc/passwd
-    if [[ "$has_authorized_keys" != "true" ]]; then
-        warn "未检测到任何用户的 SSH 公钥（authorized_keys），正在回滚 PasswordAuthentication 设置以防止锁定..."
-        warn "请手动配置 SSH 公钥后再将 PasswordAuthentication 设为 no。"
-        sed -i '/^PasswordAuthentication no/d' /etc/ssh/sshd_config.d/99-cis-hardening.conf
-    fi
-
-    # 验证 SSH 配置语法正确后再重载
-    local sshd_test_output=""
-    if sshd_test_output=$(sshd -t 2>&1); then
-        # 使用 reload 而非 restart，避免断开当前 SSH 会话
-        if ! systemctl reload sshd 2>/dev/null && ! systemctl reload ssh 2>/dev/null; then
-            warn "SSH 服务重载失败，新配置将在下次重启后生效。请手动执行: systemctl reload sshd（或 systemctl reload ssh）"
-        else
-            info "SSH 安全加固已应用并重载。"
-        fi
-    else
-        warn "SSH 配置验证失败，正在回滚以避免 SSH 服务中断..."
-        warn "sshd -t 输出: ${sshd_test_output}"
-        rm -f /etc/ssh/sshd_config.d/99-cis-hardening.conf
-        # 从备份恢复完整的 SSH 配置目录（如果备份存在）
-        if [[ -d "${BACKUP_DIR}/etc_ssh" ]]; then
-            cp -a "${BACKUP_DIR}/etc_ssh/." /etc/ssh/ 2>/dev/null || true
-            warn "已从备份恢复 SSH 配置: ${BACKUP_DIR}/etc_ssh"
-        fi
-        warn "SSH 加固配置已回滚。请手动检查 SSH 设置。"
-    fi
-}
-
-###############################################################################
 # 主函数
 ###############################################################################
 main() {
@@ -2204,10 +2076,9 @@ main() {
         info "  14. 创建监控和健康检查脚本及 systemd 定时器"
         info "  15. 禁用不必要的服务（CIS 基准）"
         info "  16. 配置登录横幅"
-        info "  17. 应用 SSH 安全加固（CIS 基准 5.2）"
-        info "  18. 验证配置文件语法"
-        info "  19. 启动 Unbound 服务"
-        info "  20. 运行安装后验证测试"
+        info "  17. 验证配置文件语法"
+        info "  18. 启动 Unbound 服务"
+        info "  19. 运行安装后验证测试"
         info ""
         info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
@@ -2235,7 +2106,6 @@ main() {
     create_monitoring_scripts
     disable_unnecessary_services
     configure_login_banners
-    configure_ssh_hardening
     validate_config
     start_unbound
     post_install_validation
