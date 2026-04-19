@@ -16,6 +16,7 @@
 - **UFW 防火墙**（nftables 后端），默认拒绝策略，SSH 速率限制
 - **Fail2Ban** 集成，防御 DNS 滥用
 - **Systemd 沙箱**（ProtectSystem、NoNewPrivileges、MemoryDenyWriteExecute 等）
+- **SSH 安全加固**（CIS 5.2：强加密算法、空闲超时、禁止 root 登录等）
 - **deny-any** 防止放大攻击
 - **最小化响应**，减少攻击面
 - 隐藏服务器标识和版本信息
@@ -144,6 +145,7 @@ Note:
 | `/etc/unbound/blocklist.conf` | 自定义域名黑名单条目 |
 | `/etc/sysctl.d/99-unbound-dns.conf` | DNS 性能 + CIS 内核安全调优 |
 | `/etc/security/limits.d/99-disable-coredumps.conf` | 核心转储限制 |
+| `/etc/ssh/sshd_config.d/99-cis-hardening.conf` | SSH 服务器安全加固（CIS 5.2） |
 
 ## 管理命令
 
@@ -207,6 +209,7 @@ dig @<server-ip> dnssec-failed.org A  # 应返回 SERVFAIL
 - [x] 登录横幅（登录前和登录后）
 - [x] 启用 ASLR
 - [x] BPF 和 ptrace 限制
+- [x] SSH 服务器安全加固（CIS 5.2：强加密算法、空闲超时、MaxAuthTries、禁止 root 登录等）
 
 ### PCI-DSS 要求
 - [x] 通过 NGINX 代理实现加密 DNS 的 TLS 1.2+（要求 4.1）
@@ -315,9 +318,10 @@ sudo ./install_unbound.sh
 5. 配置 UFW 防火墙默认拒绝策略
 6. 设置 Fail2Ban 防御 DNS 滥用
 7. 应用 systemd 沙箱加固
-8. 创建监控脚本和维护定时器
-9. 验证配置并启动服务
-10. 运行安装后健康检查
+8. 应用 SSH 安全加固（CIS 5.2）
+9. 创建监控脚本和维护定时器
+10. 验证配置并启动服务
+11. 运行安装后健康检查
 
 > **提示**：安装日志保存在 `/var/log/unbound-install.log`。如有问题，请首先检查此文件。
 
