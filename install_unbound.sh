@@ -465,8 +465,10 @@ kernel.sysrq = 244
 # 限制非特权用户使用性能计数器（CIS 安全加固）
 kernel.perf_event_paranoid = 3
 
-# 禁止非特权用户查看内核符号地址（CIS 安全加固）
-kernel.unprivileged_userns_clone = 0
+# 限制非特权用户创建用户命名空间（CIS 安全加固）
+# Debian 13 (kernel 6.x) 使用 AppArmor 限制非特权用户命名空间
+# kernel.unprivileged_userns_clone 已在 Debian 13 中弃用
+kernel.apparmor_restrict_unprivileged_userns = 1
 SYSCTL
 
     sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 参数可能未成功应用。"
@@ -659,11 +661,16 @@ server:
     do-udp: yes
     do-tcp: yes
     prefer-ip6: no
+    # 对上游权威服务器优先使用 UDP（显式声明）
+    tcp-upstream: no
 
     # --- TCP 连接设置 ---
     incoming-num-tcp: 1024
     outgoing-num-tcp: 100
     edns-tcp-keepalive: yes
+    # TCP 空闲连接超时（毫秒）- 防止公共 DNS 上的 TCP 连接耗尽攻击
+    # RFC 7766 建议 DNS-over-TCP 至少保持 10 秒；20 秒兼顾安全与兼容
+    tcp-idle-timeout: 20000
 
     # --- 性能调优 ---
     num-threads: ${NUM_THREADS}
@@ -684,6 +691,9 @@ server:
     # 使用连接式 UDP socket 提升速度
     udp-connect: yes
 
+    # 避免使用特权端口进行出站查询（安全加固）
+    outgoing-port-avoid: 0-1023
+
     # 轮询 RRset 中的记录顺序以实现负载均衡
     rrset-roundrobin: yes
 
@@ -695,6 +705,7 @@ server:
     # 刷新时提供过期数据（零停机缓存）
     serve-expired: yes
     serve-expired-ttl: 86400
+    # 客户端超时（毫秒）: 1800ms 后若无上游响应则提供过期缓存
     serve-expired-client-timeout: 1800
     serve-expired-reply-ttl: 30
 
@@ -770,9 +781,12 @@ server:
     ratelimit: ${RATELIMIT}
     ratelimit-slabs: ${RATELIMIT_SLABS}
     ratelimit-size: 4m
+    # factor 0: 超出速率限制的查询全部丢弃（不进行概率放行）
+    ratelimit-factor: 0
     ip-ratelimit: ${IP_RATELIMIT}
     ip-ratelimit-slabs: ${IP_RATELIMIT_SLABS}
     ip-ratelimit-size: 4m
+    ip-ratelimit-factor: 0
 
     # --- 日志记录（PCI-DSS 合规审计日志）---
     # 注意: log-queries/log-replies 设为 no 以避免公共 DNS 场景下的性能和存储开销。
@@ -842,6 +856,13 @@ EOF
     if [[ "$certs_ok" != "true" ]]; then
         warn "远程控制证书不完整，切换为无证书模式以避免 Unbound 启动失败。"
         sed -i 's/control-use-cert: yes/control-use-cert: no/' "$UNBOUND_CONF_DIR/02-remote-control.conf"
+    else
+        # 设置密钥文件的严格权限（CIS/PCI-DSS: 私钥仅 root 和 unbound 可读）
+        chmod 640 /etc/unbound/unbound_server.key /etc/unbound/unbound_control.key
+        chmod 644 /etc/unbound/unbound_server.pem /etc/unbound/unbound_control.pem
+        chown root:unbound /etc/unbound/unbound_server.key /etc/unbound/unbound_control.key
+        chown root:unbound /etc/unbound/unbound_server.pem /etc/unbound/unbound_control.pem
+        info "远程控制密钥文件权限已加固。"
     fi
 
     info "Unbound 配置生成完成。"
@@ -1008,6 +1029,8 @@ configure_logrotate() {
     delaycompress
     missingok
     notifempty
+    dateext
+    dateformat .%Y%m%d
     create 0640 unbound unbound
     sharedscripts
     postrotate
