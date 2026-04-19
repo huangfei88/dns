@@ -1213,7 +1213,12 @@ num_logs = 13
 max_log_file = 100
 # CIS 4.1.1.3: 日志满时保留旧日志（不允许覆盖）
 max_log_file_action = KEEP_LOGS
-# CIS 4.1.1.4: 空间不足时让系统进入单用户模式（防止日志丢失）
+# CIS 4.1.1.4: 空间不足时的操作策略（防止日志丢失）
+# space_left_action=SYSLOG: 剩余 100MB 时记录警告日志（管理员处理）
+# admin_space_left_action=HALT: 剩余 50MB 时停止系统（PCI-DSS: 不允许日志丢失）
+#   注意: HALT 是 PCI-DSS 的严格合规要求；若运营需求允许日志丢失风险，
+#         可改为 SUSPEND 或 SYSLOG，但需更新 PCI-DSS 合规文档
+# disk_full_action=HALT: 磁盘满时停止系统（同上）
 space_left = 100
 space_left_action = SYSLOG
 admin_space_left = 50
@@ -1335,8 +1340,9 @@ EOF
 -a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -k privilege-escalation
 -a always,exit -F arch=b64 -S setresuid -S setresgid -k privilege-escalation
 
-# 将规则设为不可变（需重启才能修改）— 在所有规则末尾添加
-# 注意: 这意味着重启前无法动态调整规则，对安全加固而言这是期望行为
+# 将审计配置设为不可变（-e 2 表示 enable=2 即锁定状态）
+# 锁定后不可动态修改审计规则，必须重启系统才能更改。
+# 这是 PCI-DSS / CIS 推荐的最高安全级别，防止攻击者篡改审计配置。
 -e 2
 EOF
     chmod 0600 /etc/audit/rules.d/99-pci-dss-cis.rules
@@ -2048,7 +2054,6 @@ configure_ssh_hardening() {
 # =============================================================================
 
 # CIS 5.2.3 - 日志级别（VERBOSE 记录密钥指纹等安全事件，满足审计要求）
-LogLevel VERBOSE
 
 # CIS 5.2.4 - 禁用 X11 转发（DNS 服务器不需要图形转发）
 X11Forwarding no
@@ -2118,12 +2123,28 @@ EOF
     chmod 0600 /etc/ssh/sshd_config.d/99-cis-hardening.conf
     chown root:root /etc/ssh/sshd_config.d/99-cis-hardening.conf
 
+    # 在禁用密码认证之前验证系统中至少有一个用户配置了 SSH 公钥。
+    # 若未找到有效公钥则回滚 PasswordAuthentication 设置，防止管理员被锁定。
+    local has_authorized_keys=false
+    while IFS=: read -r _ _ _ _ _ homedir _; do
+        local keyfile="${homedir}/.ssh/authorized_keys"
+        if [[ -f "$keyfile" ]] && [[ -s "$keyfile" ]]; then
+            has_authorized_keys=true
+            break
+        fi
+    done < /etc/passwd
+    if [[ "$has_authorized_keys" != "true" ]]; then
+        warn "未检测到任何用户的 SSH 公钥（authorized_keys），正在回滚 PasswordAuthentication 设置以防止锁定..."
+        warn "请手动配置 SSH 公钥后再将 PasswordAuthentication 设为 no。"
+        sed -i '/^PasswordAuthentication no/d' /etc/ssh/sshd_config.d/99-cis-hardening.conf
+    fi
+
     # 验证 SSH 配置语法正确后再重载
     local sshd_test_output=""
     if sshd_test_output=$(sshd -t 2>&1); then
         # 使用 reload 而非 restart，避免断开当前 SSH 会话
         if ! systemctl reload sshd 2>/dev/null && ! systemctl reload ssh 2>/dev/null; then
-            warn "SSH 服务重载失败，新配置将在下次重启后生效。请手动执行: systemctl reload sshd"
+            warn "SSH 服务重载失败，新配置将在下次重启后生效。请手动执行: systemctl reload sshd（或 systemctl reload ssh）"
         else
             info "SSH 安全加固已应用并重载。"
         fi
