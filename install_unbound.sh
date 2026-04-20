@@ -370,6 +370,26 @@ install_packages() {
     apt-get clean
     apt-get autoremove -y -qq 2>/dev/null || true
 
+    # 验证 Unbound 的 DoH/DoT 编译支持
+    # Debian 13 (Trixie) 的 unbound 软件包编译时包含 --with-libnghttp2（DoH）和 OpenSSL（DoT），
+    # 但在非 Debian 13 或定制构建环境下可能缺失该支持。
+    local unbound_build_info
+    unbound_build_info="$(unbound -V 2>&1 || true)"
+
+    # 检查 DoH 支持（需要 libnghttp2 编译支持）
+    if echo "$unbound_build_info" | grep -q -- '--with-libnghttp2'; then
+        info "DoH 支持已确认（已编译 --with-libnghttp2）。"
+    else
+        fatal "当前安装的 Unbound 未编译 --with-libnghttp2，不支持原生 DoH。\n  请确保使用 Debian 13 (Trixie) 官方软件包或自行编译时启用 --with-libnghttp2。\n  如仅需 DNS + DoT（无 DoH），请移除配置中的 https-port 相关设置。"
+    fi
+
+    # 检查 DoT 支持（需要 OpenSSL/TLS 库链接）
+    if echo "$unbound_build_info" | grep -qi 'openssl\|libressl\|gnutls'; then
+        info "DoT 支持已确认（已链接 TLS 库）。"
+    else
+        warn "未在 Unbound 编译信息中检测到 TLS 库链接，DoT 可能不可用。"
+    fi
+
     info "所有软件包安装完成。"
 }
 
@@ -488,6 +508,8 @@ ${UNBOUND_LOG_DIR}/ r,
 ${UNBOUND_LOG_DIR}/** rw,
 /var/lib/unbound/ r,
 /var/lib/unbound/** rw,
+${TLS_CERT_DIR}/ r,
+${TLS_CERT_DIR}/** r,
 ${marker_end}
 APPARMOR
             else
@@ -498,6 +520,8 @@ ${UNBOUND_LOG_DIR}/ r,\\
 ${UNBOUND_LOG_DIR}/** rw,\\
 /var/lib/unbound/ r,\\
 /var/lib/unbound/** rw,\\
+${TLS_CERT_DIR}/ r,\\
+${TLS_CERT_DIR}/** r,\\
 ${marker_end}" "$apparmor_local"
             fi
             # 重新加载 AppArmor 配置
@@ -673,8 +697,11 @@ server:
     # --- TLS 设置（DoT/DoH 所需）---
     tls-service-key: "${TLS_KEY_FILE}"
     tls-service-pem: "${TLS_CERT_FILE}"
-    # TLS 加密套件（仅允许 TLS 1.2+，符合 PCI-DSS 要求）
-    tls-ciphers: "PROFILE=SYSTEM"
+    # TLS 加密套件（仅允许 TLS 1.2+ 完美前向保密，符合 PCI-DSS 要求）
+    # 注意: Debian 13 Unbound 链接 OpenSSL，此处使用 OpenSSL 密码套件字符串格式
+    # ECDHE/DHE 密钥交换 + AESGCM/CHACHA20 对称加密，排除弱算法
+    tls-ciphers: "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20"
+    # TLS 1.3 密码套件（格式对 OpenSSL 和 GnuTLS 通用）
     tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
 
     # DoT 端口声明
@@ -1611,6 +1638,16 @@ is_port53_in_use() {
 }
 
 ###############################################################################
+# 检查指定 TCP 端口是否被非 Unbound 进程占用
+###############################################################################
+is_tcp_port_in_use() {
+    local port="$1"
+    local tcp_others
+    tcp_others="$(ss -tlnp 2>/dev/null | grep -E ":${port}([^0-9]|$)" | grep -Ev 'unbound' || true)"
+    [[ -n "$tcp_others" ]]
+}
+
+###############################################################################
 # 启动并启用 Unbound
 ###############################################################################
 start_unbound() {
@@ -1639,6 +1676,19 @@ start_unbound() {
         if is_port53_in_use; then
             fatal "端口 53 仍被占用，无法启动 Unbound。请手动检查: ss -tlnp | grep ':53 '"
         fi
+    fi
+
+    # 检查 DoT 端口 853 是否被其他服务占用
+    if is_tcp_port_in_use "${DOT_PORT}"; then
+        warn "端口 ${DOT_PORT} (DoT) 被其他服务占用。Unbound 可能无法提供 DoT 服务。"
+        warn "请检查: ss -tlnp | grep ':${DOT_PORT}'"
+    fi
+
+    # 检查 DoH 端口 443 是否被其他服务占用（常见冲突：nginx、apache2、caddy 等）
+    if is_tcp_port_in_use "${DOH_PORT}"; then
+        local conflicting_service
+        conflicting_service="$(ss -tlnp 2>/dev/null | grep -E ":${DOH_PORT}([^0-9]|\$)" | grep -Ev 'unbound' | head -1 || true)"
+        fatal "端口 ${DOH_PORT} (DoH) 已被其他服务占用，Unbound 无法启动。\n  冲突详情: ${conflicting_service}\n  请先停止占用端口 443 的服务（如 nginx、apache2 等）再重新安装。"
     fi
 
     # 立即启动 Unbound 以最小化 DNS 不可用窗口
