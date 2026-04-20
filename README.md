@@ -50,7 +50,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - **Network**: Public IP address with port 53 open (ports 443/853 needed if NGINX proxy is used for DoT/DoH)
 - **Privileges**: Root access (sudo)
 
-> **Note**: DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are handled by a separately installed NGINX reverse proxy. TLS certificates are provisioned during the NGINX installation. This script only configures Unbound as a recursive DNS resolver on port 53.
+> **Note**: DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are handled by a separately installed NGINX reverse proxy. TLS certificates are provisioned during the NGINX installation. This script configures Unbound as a recursive DNS resolver on port 53 and opens the DoT firewall port (853). The DoH port (443) is opened by the NGINX install script.
 
 ## Quick Start
 
@@ -85,10 +85,10 @@ Options:
   -v, --version         Show script version
 
 Note:
-  DoT (DNS-over-TLS) and DoH (DNS-over-HTTPS) are handled by a separately
-  installed NGINX reverse proxy. TLS certificates are provisioned during NGINX
-  installation. This script only configures Unbound as a recursive DNS resolver
-  on port 53.
+  DoT (DNS-over-TLS, port 853) firewall port is opened by this script.
+  DoH (DNS-over-HTTPS, port 443) is opened by the separate NGINX install script.
+  TLS certificates are provisioned during NGINX installation.
+  This script configures Unbound as a recursive DNS resolver on port 53.
 
 Examples:
   sudo ./install_unbound.sh                 # Default: install
@@ -390,9 +390,8 @@ dig @<server-ip> example.com A | grep "Query time"
 
 DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are provided by NGINX as a reverse proxy in front of Unbound. This section provides complete, production-ready configuration.
 
-> The install script does **not** open ports 853 or 443 (it follows the principle of least privilege). Before starting NGINX, open them with:
+> The install script already opens port 853 (DoT) in the firewall. Only port 443 (DoH) needs to be opened separately before starting NGINX:
 > ```bash
-> sudo ufw allow 853/tcp
 > sudo ufw allow 443/tcp
 > ```
 

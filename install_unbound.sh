@@ -12,9 +12,11 @@
 #   - UFW 防火墙（基于 nftables 后端）
 #   - 全面的日志记录和监控
 #
-# 注意: DOT (DNS-over-TLS, 端口 853) 和 DoH (DNS-over-HTTPS, 端口 443) 由
-#       单独安装的 NGINX 反向代理实现，SSL 证书也在安装 NGINX 时申请。
-#       本脚本仅配置 Unbound 作为纯 DNS 递归解析服务器（端口 53）。
+# 注意: DoT (DNS-over-TLS, 端口 853) 由本脚本放通防火墙端口，
+#       DoH (DNS-over-HTTPS, 端口 443) 由单独安装的 NGINX 反向代理放通。
+#       SSL 证书在安装 NGINX 时申请。
+#       本脚本配置 Unbound 作为纯 DNS 递归解析服务器（端口 53），
+#       并预先放通 DoT 端口 853 供后续 NGINX 配置使用。
 #
 # 用法:
 #   sudo bash install_unbound.sh [install|uninstall|update] [--dry-run]
@@ -42,7 +44,7 @@ readonly UNBOUND_CONF_DIR="/etc/unbound/unbound.conf.d"
 readonly UNBOUND_MAIN_CONF="/etc/unbound/unbound.conf"
 readonly UNBOUND_LOG_DIR="/var/log/unbound"
 
-# 网络端口默认值（仅 DNS 端口 53，DOT/DoH 由 NGINX 处理）
+# 网络端口默认值（DNS 端口 53 + DoT 端口 853，DoH 端口 443 由 NGINX 处理）
 readonly DNS_PORT=53
 
 # 信号退出码常量
@@ -203,8 +205,9 @@ usage() {
   -v, --version         显示脚本版本
 
 注意:
-  DOT (DNS-over-TLS) 和 DoH (DNS-over-HTTPS) 由单独安装的 NGINX 实现。
-  SSL 证书在安装 NGINX 时申请。本脚本仅配置 Unbound 纯 DNS 递归解析。
+  DoT (DNS-over-TLS, 端口 853) 防火墙端口由本脚本放通。
+  DoH (DNS-over-HTTPS, 端口 443) 由单独安装的 NGINX 放通。
+  SSL 证书在安装 NGINX 时申请。本脚本配置 Unbound 纯 DNS 递归解析。
 
 示例:
   sudo $SCRIPT_NAME                 # 默认执行安装
@@ -723,7 +726,7 @@ EOF
 # =============================================================================
 # 服务器核心配置
 # 针对 Azure Standard_B2ats_v2 (2 vCPU, 1 GiB 内存) 优化
-# Unbound 仅提供端口 53 DNS 服务，DOT/DoH 由 NGINX 反向代理处理
+# Unbound 仅提供端口 53 DNS 服务，DoT(853)/DoH(443) 由 NGINX 反向代理处理
 # =============================================================================
 server:
     # --- 接口绑定（仅 DNS 端口 53）---
@@ -1154,8 +1157,12 @@ configure_firewall() {
     ufw allow 53/tcp >/dev/null 2>&1
     ufw allow 53/udp >/dev/null 2>&1
 
-    # 注意: DOT (端口 853) 和 DoH (端口 443) 由单独安装的 NGINX 反向代理处理。
-    # NGINX 安装脚本应自行开放这些端口。遵循最小权限原则，此处不预先开放。
+    # DoT (DNS-over-TLS, TCP 端口 853)
+    # NGINX 使用此端口终止 TLS 并代理到 Unbound，此处预先放通
+    ufw allow 853/tcp >/dev/null 2>&1
+
+    # 注意: DoH (端口 443) 由单独安装的 NGINX 反向代理处理。
+    # NGINX 安装脚本应自行开放 443 端口。
 
     # 启用日志记录（中等级别用于审计）
     ufw logging medium >/dev/null 2>&1
@@ -1164,8 +1171,8 @@ configure_firewall() {
     ufw --force enable >/dev/null 2>&1
 
     info "UFW 防火墙已配置并激活。"
-    info "已开放端口: SSH(${ssh_port}/tcp-限速), DNS(53/tcp+udp)"
-    info "注意: DoT(853) 和 DoH(443) 端口将由 NGINX 安装脚本开放。"
+    info "已开放端口: SSH(${ssh_port}/tcp-限速), DNS(53/tcp+udp), DoT(853/tcp)"
+    info "注意: DoH(443) 端口将由 NGINX 安装脚本开放。"
 }
 
 ###############################################################################
@@ -1987,9 +1994,10 @@ print_summary() {
 ║  防火墙已开放端口:                                                           ║
 ║    • SSH:  $(printf '%-10s' "${ssh_port}/tcp") (速率限制)                                          ║
 ║    • DNS:  53/tcp + 53/udp                                                  ║
+║    • DoT:  853/tcp                                                          ║
 ║                                                                            ║
-║  注意: DOT (端口 853) 和 DoH (端口 443) 由 NGINX 反向代理提供               ║
-║        请单独安装 NGINX 并由其安装脚本开放 853/443 端口                       ║
+║  注意: DoH (端口 443) 由 NGINX 反向代理提供                                  ║
+║        请单独安装 NGINX 并由其安装脚本开放 443 端口                            ║
 ║                                                                            ║
 ║  配置文件:                                                                  ║
 ║    • 主配置:        ${UNBOUND_MAIN_CONF}                           ║
@@ -2119,7 +2127,7 @@ uninstall_unbound() {
         info "  1.  停止并禁用 Unbound 服务"
         info "  2.  停止并禁用相关定时器（根提示/信任锚更新）"
         info "  3.  移除 Fail2Ban DNS 防护规则"
-        info "  4.  移除 UFW 防火墙中的 DNS 规则（保留 SSH 规则）"
+        info "  4.  移除 UFW 防火墙中的 DNS 和 DoT 规则（保留 SSH 规则）"
         info "  5.  移除 Unbound 相关的 sysctl 调优"
         info "  6.  移除 Unbound 日志轮转配置"
         info "  7.  移除 Unbound auditd 审计规则"
@@ -2181,11 +2189,13 @@ uninstall_unbound() {
     fi
     info "  Fail2Ban DNS 规则已移除。"
 
-    info "步骤 4: 移除 UFW 防火墙中的 DNS 规则..."
+    info "步骤 4: 移除 UFW 防火墙中的 DNS 和 DoT 规则..."
     ufw delete allow 53/tcp 2>/dev/null || true
     ufw delete allow 53/udp 2>/dev/null || true
-    # 注意: 仅移除 DNS 规则，SSH 规则保持不变以确保远程管理不受影响
-    info "  DNS 防火墙规则已移除（SSH 规则保持不变）。"
+    ufw delete allow 853/tcp 2>/dev/null || true
+    # 注意: 仅移除 DNS 和 DoT 规则，SSH 规则保持不变以确保远程管理不受影响
+    # DoH(443) 由 NGINX 脚本管理，此处不移除
+    info "  DNS 和 DoT 防火墙规则已移除（SSH 规则保持不变）。"
 
     info "步骤 5: 移除 Unbound 相关的 sysctl 调优..."
     rm -f /etc/sysctl.d/99-unbound-dns.conf
@@ -2435,8 +2445,8 @@ main() {
     info "║   目标: Debian 13 / Azure Standard_B2ats_v2                 ║"
     info "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    info "Unbound 仅提供 DNS 端口 53 服务"
-    info "DOT/DoH 将由单独安装的 NGINX 反向代理提供"
+    info "Unbound 仅提供 DNS 端口 53 服务（DoT 端口 853 已预先放通）"
+    info "DoH (端口 443) 将由单独安装的 NGINX 反向代理提供"
     echo ""
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -2462,7 +2472,7 @@ main() {
         info "  18. 启动 Unbound 服务"
         info "  19. 运行安装后验证测试"
         info ""
-        info "注意: DOT/DoH 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
+        info "注意: DoH (端口 443) 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
     fi
 

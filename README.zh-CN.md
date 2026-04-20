@@ -50,7 +50,7 @@
 - **网络**：公网 IP 地址，端口 53 开放（如使用 NGINX 代理 DoT/DoH，还需开放 443/853 端口）
 - **权限**：Root 访问权限（sudo）
 
-> **注意**：DNS-over-TLS（DoT，端口 853）和 DNS-over-HTTPS（DoH，端口 443）由单独安装的 NGINX 反向代理处理。TLS 证书在 NGINX 安装时配置。本脚本仅将 Unbound 配置为端口 53 上的递归 DNS 解析器。
+> **注意**：DNS-over-TLS（DoT，端口 853）和 DNS-over-HTTPS（DoH，端口 443）由单独安装的 NGINX 反向代理处理。TLS 证书在 NGINX 安装时配置。本脚本将 Unbound 配置为端口 53 上的递归 DNS 解析器，并自动放通 DoT 防火墙端口（853）。DoH 端口（443）由 NGINX 安装脚本放通。
 
 ## 快速开始
 
@@ -85,8 +85,9 @@ sudo ./install_unbound.sh --dry-run
   -v, --version         显示脚本版本
 
 注意:
-  DoT (DNS-over-TLS) 和 DoH (DNS-over-HTTPS) 由单独安装的 NGINX 反向代理处理。
-  TLS 证书在 NGINX 安装时配置。本脚本仅将 Unbound 配置为端口 53 上的递归 DNS 解析器。
+  DoT (DNS-over-TLS, 端口 853) 防火墙端口由本脚本放通。
+  DoH (DNS-over-HTTPS, 端口 443) 由单独安装的 NGINX 放通。
+  TLS 证书在 NGINX 安装时配置。本脚本配置 Unbound 为端口 53 上的递归 DNS 解析器。
 
 示例:
   sudo ./install_unbound.sh                 # 默认执行安装
@@ -388,9 +389,8 @@ dig @<server-ip> example.com A | grep "Query time"
 
 DNS-over-TLS（DoT，端口 853）和 DNS-over-HTTPS（DoH，端口 443）由 NGINX 作为 Unbound 前端的反向代理提供。本节提供完整的生产级配置。
 
-> 安装脚本**不会**开放端口 853 或 443（遵循最小权限原则）。启动 NGINX 之前，请先开放这些端口：
+> 安装脚本已自动放通端口 853（DoT）的防火墙规则。启动 NGINX 之前，仅需手动放通端口 443（DoH）：
 > ```bash
-> sudo ufw allow 853/tcp
 > sudo ufw allow 443/tcp
 > ```
 
