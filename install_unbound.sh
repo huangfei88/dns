@@ -1818,8 +1818,6 @@ uninstall_unbound() {
         update-root-hints.service
         update-trust-anchor.timer
         update-trust-anchor.service
-        unbound-health-check.timer
-        unbound-health-check.service
     )
     for unit in "${timer_units[@]}"; do
         if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
@@ -1832,8 +1830,6 @@ uninstall_unbound() {
     rm -f /etc/systemd/system/update-root-hints.service
     rm -f /etc/systemd/system/update-trust-anchor.timer
     rm -f /etc/systemd/system/update-trust-anchor.service
-    rm -f /etc/systemd/system/unbound-health-check.timer
-    rm -f /etc/systemd/system/unbound-health-check.service
 
     info "步骤 3: 移除 Fail2Ban DNS 防护规则..."
     rm -f /etc/fail2ban/jail.d/unbound-dns.conf
