@@ -6,11 +6,14 @@
 # 功能特性:
 #   - DNSSEC 验证及自动根信任锚管理
 #   - 针对低延迟公共 DNS 的高性能调优（仅端口 53 UDP/TCP）
-#   - CIS 基准和 PCI-DSS 合规加固（内核、文件系统、服务）
-#   - 速率限制、访问控制和防放大攻击
+#   - DNS 专用速率限制、访问控制和防放大攻击
 #   - Systemd 服务沙箱隔离
-#   - UFW 防火墙（基于 nftables 后端）
+#   - UFW 防火墙 DNS 规则（增量添加，不重置已有规则）
 #   - 全面的日志记录和监控
+#
+# 注意: CIS 基准和 PCI-DSS 系统级加固（SSH、内核安全参数、登录横幅、
+#       核心转储限制、禁用不必要服务、系统审计规则等）假定已由系统管理员
+#       统一管理。本脚本仅负责 Unbound DNS 相关组件的安装和配置。
 #
 # 注意: DoT (DNS-over-TLS, 端口 853) 由本脚本放通防火墙端口，
 #       DoH (DNS-over-HTTPS, 端口 443) 由单独安装的 NGINX 反向代理放通。
@@ -32,7 +35,7 @@ umask 0027
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.8.0"
+readonly SCRIPT_VERSION="1.9.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -87,41 +90,6 @@ readonly NC='\033[0m'
 ###############################################################################
 DRY_RUN="false"
 ACTION="install"    # 默认动作: install | uninstall | update
-
-###############################################################################
-# SSH 端口自动检测
-# 从 sshd 配置文件中读取实际监听端口，避免硬编码 22。
-# 优先检查 sshd_config.d/ 下的配置片段（Debian 13 默认），再检查主配置文件。
-# 如果无法确定，回退到默认端口 22。
-###############################################################################
-detect_ssh_port() {
-    local ssh_port=""
-
-    # 方法 1: 从 sshd_config.d/*.conf 中查找（Debian 13 推荐方式）
-    if [[ -d /etc/ssh/sshd_config.d ]]; then
-        ssh_port="$(grep -rhiE '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
-                    | tail -1 | awk '{print $2}' | tr -d '[:space:]')"
-    fi
-
-    # 方法 2: 从主配置文件 sshd_config 中查找
-    if [[ -z "$ssh_port" ]] && [[ -f /etc/ssh/sshd_config ]]; then
-        ssh_port="$(grep -iE '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null \
-                    | tail -1 | awk '{print $2}' | tr -d '[:space:]')"
-    fi
-
-    # 方法 3: 检测当前 sshd 实际监听的端口
-    if [[ -z "$ssh_port" ]]; then
-        ssh_port="$(ss -tlnp 2>/dev/null | grep -E 'sshd' \
-                    | awk '{print $4}' | grep -oE '[0-9]+$' | head -1)"
-    fi
-
-    # 回退: 默认端口 22
-    if [[ -z "$ssh_port" ]]; then
-        ssh_port="22"
-    fi
-
-    echo "$ssh_port"
-}
 
 ###############################################################################
 # 日志辅助函数
@@ -400,16 +368,22 @@ install_packages() {
 }
 
 ###############################################################################
-# DNS 服务器性能调优 + CIS 基准内核安全加固
+# DNS 服务器性能调优
+# 注意: CIS 基准内核安全加固（IP 转发、ICMP、ASLR、核心转储等）
+#       假定已由系统级加固配置统一管理，此处仅配置 DNS 性能相关参数。
 ###############################################################################
 tune_system_for_dns() {
-    info "正在应用 DNS 服务器性能调优和内核安全加固..."
+    info "正在应用 DNS 服务器性能调优..."
 
-    # --- DNS 性能和 CIS/PCI-DSS 内核安全参数 ---
+    # --- DNS 性能调优参数 ---
+    # 注意: CIS 基准内核安全加固（IP 转发、ICMP 重定向、SYN Cookie、ASLR、
+    #       核心转储限制等）假定已由系统级加固脚本统一管理，此处仅包含
+    #       DNS 服务器性能优化参数，避免与已有的系统加固配置冲突。
     cat > /etc/sysctl.d/99-unbound-dns.conf <<'SYSCTL'
 # =============================================================================
-# 企业级 DNS 服务器内核调优参数
-# 包含 DNS 性能优化和 CIS 基准/PCI-DSS 安全加固
+# DNS 服务器网络性能调优参数
+# 针对高吞吐 Unbound 递归解析优化
+# 注意: CIS/PCI-DSS 内核安全加固由系统级配置统一管理，不在此文件中重复设置
 # =============================================================================
 
 # === 网络性能优化（DNS 流量） ===
@@ -452,117 +426,12 @@ fs.file-max = 1048576
 
 # 扩展本地端口范围（支持大量出站 DNS 查询）
 net.ipv4.ip_local_port_range = 1024 65535
-
-# === CIS 基准 - 内核安全加固 ===
-
-# 禁用 IP 转发（CIS 3.1.1）- DNS 服务器不需要路由功能
-net.ipv4.ip_forward = 0
-net.ipv6.conf.all.forwarding = 0
-net.ipv6.conf.default.forwarding = 0
-
-# 禁用 ICMP 重定向发送（CIS 3.1.2）
-net.ipv4.conf.all.send_redirects = 0
-net.ipv4.conf.default.send_redirects = 0
-
-# 禁止接受源路由包（CIS 3.2.1）
-net.ipv4.conf.all.accept_source_route = 0
-net.ipv4.conf.default.accept_source_route = 0
-net.ipv6.conf.all.accept_source_route = 0
-net.ipv6.conf.default.accept_source_route = 0
-
-# 禁止接受 ICMP 重定向（CIS 3.2.2）
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.default.accept_redirects = 0
-net.ipv6.conf.all.accept_redirects = 0
-net.ipv6.conf.default.accept_redirects = 0
-
-# 禁止接受安全 ICMP 重定向（CIS 3.2.3）
-net.ipv4.conf.all.secure_redirects = 0
-net.ipv4.conf.default.secure_redirects = 0
-
-# 记录可疑的火星包（CIS 3.2.4）
-net.ipv4.conf.all.log_martians = 1
-net.ipv4.conf.default.log_martians = 1
-
-# 忽略 ICMP 广播请求（CIS 3.2.5）- 防止 Smurf 攻击
-net.ipv4.icmp_echo_ignore_broadcasts = 1
-
-# 忽略伪造的 ICMP 错误响应（CIS 3.2.6）
-net.ipv4.icmp_ignore_bogus_error_responses = 1
-
-# 启用反向路径过滤（CIS 3.2.7）- 防止 IP 欺骗
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
-
-# 启用 TCP SYN Cookie（CIS 3.2.8）- 防止 SYN 洪泛攻击
-net.ipv4.tcp_syncookies = 1
-
-# 禁止接受 IPv6 路由通告（CIS 3.3.1）
-net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.default.accept_ra = 0
-
-# === CIS 基准 - 进程安全 ===
-
-# 启用 ASLR 地址空间布局随机化（CIS 1.5.3）
-kernel.randomize_va_space = 2
-
-# 禁用核心转储的 SUID 程序（CIS 1.5.1）
-fs.suid_dumpable = 0
-
-# 限制内核指针泄露
-kernel.kptr_restrict = 2
-
-# 限制 dmesg 访问
-kernel.dmesg_restrict = 1
-
-# 禁用非特权用户 BPF（CIS 安全加固）
-kernel.unprivileged_bpf_disabled = 1
-
-# 加固 BPF JIT 编译器（CIS 安全加固）
-net.core.bpf_jit_harden = 2
-
-# 限制 ptrace 范围（CIS 1.5.4）
-kernel.yama.ptrace_scope = 2
-
-# 禁用 Magic SysRq 键（CIS 1.5.2）
-kernel.sysrq = 0
-
-# 限制非特权用户使用性能计数器（CIS 安全加固）
-kernel.perf_event_paranoid = 3
-
-# 限制非特权用户创建用户命名空间（CIS 安全加固）
-# Debian 13 (kernel 6.x) 使用 AppArmor 限制非特权用户命名空间
-# kernel.unprivileged_userns_clone 已在 Debian 13 中弃用
-kernel.apparmor_restrict_unprivileged_userns = 1
 SYSCTL
 
     chmod 0600 /etc/sysctl.d/99-unbound-dns.conf
     chown root:root /etc/sysctl.d/99-unbound-dns.conf
     sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 参数可能未成功应用。"
-    info "DNS 性能调优和内核安全加固参数已应用。"
-
-    # --- 核心转储限制（CIS 1.5.1）---
-    cat > /etc/security/limits.d/99-disable-coredumps.conf <<'EOF'
-# 禁用核心转储 - CIS 基准 1.5.1
-* hard core 0
-* soft core 0
-EOF
-    chmod 0644 /etc/security/limits.d/99-disable-coredumps.conf
-    chown root:root /etc/security/limits.d/99-disable-coredumps.conf
-
-    # 禁用 systemd 核心转储收集（CIS 1.5.1 补充）
-    mkdir -p /etc/systemd/coredump.conf.d
-    chmod 0755 /etc/systemd/coredump.conf.d
-    chown root:root /etc/systemd/coredump.conf.d
-    cat > /etc/systemd/coredump.conf.d/99-disable-coredumps.conf <<'EOF'
-# 禁用 systemd 核心转储收集 - CIS 基准 1.5.1
-[Coredump]
-Storage=none
-ProcessSizeMax=0
-EOF
-    chmod 0644 /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
-    chown root:root /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
-    info "核心转储已禁用（limits.d + systemd coredump）。"
+    info "DNS 性能调优参数已应用。"
 }
 
 ###############################################################################
@@ -1136,30 +1005,28 @@ EOF
 # UFW 防火墙配置
 ###############################################################################
 configure_firewall() {
-    info "正在配置 UFW 防火墙..."
+    info "正在配置 UFW 防火墙（仅 DNS 相关规则）..."
 
-    # 自动检测当前 SSH 端口
-    local ssh_port
-    ssh_port="$(detect_ssh_port)"
-    info "检测到 SSH 端口: ${ssh_port}"
+    # 注意: 不执行 ufw reset，保留系统已有的 SSH 和其他防火墙规则。
+    # SSH 端口及系统级安全规则由系统管理员单独管理。
 
-    # 重置 UFW 到干净状态（非交互式）
-    ufw --force reset >/dev/null 2>&1
-
-    # 默认策略：拒绝入站，允许出站
+    # 确保默认策略已设置（幂等操作，不影响已有规则）
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
 
-    # SSH 速率限制（每个 IP 每 30 秒限制 6 次连接）
-    ufw limit "${ssh_port}/tcp" >/dev/null 2>&1
-
-    # DNS (UDP 和 TCP 端口 53)
-    ufw allow 53/tcp >/dev/null 2>&1
-    ufw allow 53/udp >/dev/null 2>&1
+    # DNS (UDP 和 TCP 端口 53) — 仅在规则不存在时添加
+    if ! ufw status | grep -qE '53/tcp\s+ALLOW'; then
+        ufw allow 53/tcp >/dev/null 2>&1
+    fi
+    if ! ufw status | grep -qE '53/udp\s+ALLOW'; then
+        ufw allow 53/udp >/dev/null 2>&1
+    fi
 
     # DoT (DNS-over-TLS, TCP 端口 853)
     # NGINX 使用此端口终止 TLS 并代理到 Unbound，此处预先放通
-    ufw allow 853/tcp >/dev/null 2>&1
+    if ! ufw status | grep -qE '853/tcp\s+ALLOW'; then
+        ufw allow 853/tcp >/dev/null 2>&1
+    fi
 
     # 注意: DoH (端口 443) 由单独安装的 NGINX 反向代理处理。
     # NGINX 安装脚本应自行开放 443 端口。
@@ -1167,12 +1034,12 @@ configure_firewall() {
     # 启用日志记录（中等级别用于审计）
     ufw logging medium >/dev/null 2>&1
 
-    # 启用 UFW（非交互式）
+    # 启用 UFW（幂等操作，若已启用则不受影响）
     ufw --force enable >/dev/null 2>&1
 
-    info "UFW 防火墙已配置并激活。"
-    info "已开放端口: SSH(${ssh_port}/tcp-限速), DNS(53/tcp+udp), DoT(853/tcp)"
-    info "注意: DoH(443) 端口将由 NGINX 安装脚本开放。"
+    info "UFW 防火墙已配置（DNS 规则已添加）。"
+    info "已开放端口: DNS(53/tcp+udp), DoT(853/tcp)"
+    info "注意: SSH 端口由系统管理员单独管理。DoH(443) 端口将由 NGINX 安装脚本开放。"
 }
 
 ###############################################################################
@@ -1259,171 +1126,39 @@ EOF
 }
 
 ###############################################################################
-# CIS 基准 §4 / PCI-DSS Req 10 — 内核审计（auditd）配置
+# Unbound DNS 专用审计规则（auditd）
+# 注意: 系统级 CIS §4 / PCI-DSS Req 10 审计配置（auditd.conf、系统审计规则）
+#       假定已由系统管理员统一配置。此处仅添加 Unbound DNS 相关的变更监控规则，
+#       以独立文件形式存放，不覆盖已有的 auditd 主配置和系统审计规则。
 ###############################################################################
-configure_auditd() {
-    info "正在配置 auditd 内核审计（CIS §4 / PCI-DSS Req 10）..."
+configure_unbound_audit() {
+    info "正在配置 Unbound DNS 专用审计规则..."
 
-    # --- auditd 主配置 ---
-    cat > /etc/audit/auditd.conf <<'EOF'
+    # 仅添加 Unbound/DNS 相关的审计规则，不触及 auditd.conf 和系统级规则
+    cat > /etc/audit/rules.d/50-unbound.rules <<'EOF'
 # =============================================================================
-# auditd 主配置 — CIS 基准 §4 / PCI-DSS v4.0 Req 10
-# =============================================================================
-log_file = /var/log/audit/audit.log
-log_format = ENRICHED
-log_group = adm
-priority_boost = 4
-flush = INCREMENTAL_ASYNC
-freq = 50
-# PCI-DSS Req 10.7.1: 至少保留 12 个月的审计日志
-num_logs = 13
-max_log_file = 100
-# CIS 4.1.1.3: 日志满时保留旧日志（不允许覆盖）
-max_log_file_action = KEEP_LOGS
-# CIS 4.1.1.4: 空间不足时的操作策略（防止日志丢失）
-# space_left_action=SYSLOG: 剩余 100MB 时记录警告日志（管理员处理）
-# admin_space_left_action=HALT: 剩余 50MB 时停止系统（PCI-DSS: 不允许日志丢失）
-#   注意: HALT 是 PCI-DSS 的严格合规要求；若运营需求允许日志丢失风险，
-#         可改为 SUSPEND 或 SYSLOG，但需更新 PCI-DSS 合规文档
-# disk_full_action=HALT: 磁盘满时停止系统（同上）
-space_left = 100
-space_left_action = SYSLOG
-admin_space_left = 50
-admin_space_left_action = HALT
-disk_full_action = HALT
-disk_error_action = HALT
-tcp_listen_queue = 5
-tcp_max_per_addr = 1
-tcp_client_max_idle = 0
-enable_krb5 = no
-krb5_principal = auditd
-distribute_network = no
-EOF
-    chmod 0640 /etc/audit/auditd.conf
-    chown root:root /etc/audit/auditd.conf
-
-    # --- CIS §4 / PCI-DSS Req 10 审计规则 ---
-    cat > /etc/audit/rules.d/99-pci-dss-cis.rules <<'EOF'
-# =============================================================================
-# auditd 审计规则 — CIS 基准 §4 / PCI-DSS v4.0 Req 10
-# 覆盖: 特权操作、认证、文件访问、网络变更、系统管理
+# Unbound DNS 配置和 DNSSEC 变更监控
+# 独立于系统级 CIS/PCI-DSS 审计规则，仅监控 DNS 相关文件变更
 # =============================================================================
 
-# 删除全部现有规则，以干净状态开始
--D
-
-# 设置缓冲区大小（高流量服务器推荐 8192）
--b 8192
-
-# 规则不匹配时的失败动作: 1=打印警告 2=内核 panic（生产选1）
--f 1
-
-# === PCI-DSS Req 10.2 / CIS 4.1.3.1: 日期和时间变更 ===
--a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
--a always,exit -F arch=b64 -S clock_settime -k time-change
--w /etc/localtime -p wa -k time-change
-
-# === CIS 4.1.3.7: 用户和组信息变更 ===
--w /etc/group -p wa -k identity
--w /etc/passwd -p wa -k identity
--w /etc/gshadow -p wa -k identity
--w /etc/shadow -p wa -k identity
--w /etc/security/opasswd -p wa -k identity
-
-# === CIS 4.1.3.4: 网络环境变更 ===
--a always,exit -F arch=b64 -S sethostname -S setdomainname -k system-locale
--w /etc/issue -p wa -k system-locale
--w /etc/issue.net -p wa -k system-locale
--w /etc/hosts -p wa -k system-locale
--w /etc/network -p wa -k system-locale
-
-# === CIS 4.1.3.1: 系统管理作用域变更（sudoers）===
--w /etc/sudoers -p wa -k scope
--w /etc/sudoers.d/ -p wa -k scope
-
-# === PCI-DSS Req 10.2.5 / CIS 4.1.3.2: sudo/su 使用 ===
--w /var/log/sudo.log -p wa -k actions
--a always,exit -F arch=b64 -C euid!=uid -F euid=0 -F auid>=1000 -F auid!=4294967295 -S execve -k user_emulation
-
-# === PCI-DSS Req 10.2.2 / CIS 4.1.3.10: 特权命令执行 ===
--a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/su -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/sbin/useradd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/sbin/usermod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/sbin/userdel -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/sbin/groupadd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/sbin/groupmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/sbin/insmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/sbin/rmmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/sbin/modprobe -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/chown -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/chmod -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/chsh -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/newgrp -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/gpasswd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/usr/bin/chage -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
--a always,exit -F path=/sbin/unix_chkpwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged
-
-# === CIS 4.1.3.6: 未授权文件访问（EACCES / EPERM）===
--a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=4294967295 -k access
--a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=4294967295 -k access
-
-# === CIS 4.1.3.8: 文件系统挂载 ===
--a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=4294967295 -k mounts
-
-# === CIS 4.1.3.9: 文件删除 ===
--a always,exit -F arch=b64 -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k delete
-
-# === PCI-DSS Req 10.2.3 / CIS 4.1.3.11: 审计日志访问 ===
--w /var/log/audit/ -p wa -k audit-log-access
--w /etc/audit/ -p wa -k audit-config
--w /etc/audit/rules.d/ -p wa -k audit-config
-
-# === PCI-DSS Req 10.2.6: 审计工具执行 ===
--w /sbin/auditctl -p x -k audit-tools
--w /sbin/auditd -p x -k audit-tools
--w /sbin/ausearch -p x -k audit-tools
--w /sbin/aureport -p x -k audit-tools
--w /sbin/autrace -p x -k audit-tools
-
-# === PCI-DSS Req 10.2.5: 认证机制变更（PAM）===
--w /etc/pam.d/ -p wa -k pam
--w /etc/security/limits.conf -p wa -k pam
--w /etc/security/limits.d/ -p wa -k pam
-
-# === SSH 配置变更监控（PCI-DSS Req 10.2）===
--w /etc/ssh/sshd_config -p wa -k sshd
--w /etc/ssh/sshd_config.d/ -p wa -k sshd
-
-# === Unbound DNS 配置变更监控 ===
+# Unbound 配置文件变更监控
 -w /etc/unbound/ -p wa -k unbound-config
+
+# DNSSEC 信任锚变更监控
 -w /var/lib/unbound/root.key -p wa -k unbound-dnssec
 
-# === 内核模块加载（CIS 4.1.3）===
--a always,exit -F arch=b64 -S init_module -S delete_module -k modules
-
-# === 系统调用: 权能提升（CIS 4.1.3）===
--a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -k privilege-escalation
--a always,exit -F arch=b64 -S setresuid -S setresgid -k privilege-escalation
-
-# 将审计配置设为不可变（-e 2 表示 enable=2 即锁定状态）
-# 锁定后不可动态修改审计规则，必须重启系统才能更改。
-# 这是 PCI-DSS / CIS 推荐的最高安全级别，防止攻击者篡改审计配置。
--e 2
+# 根提示文件变更监控
+-w /var/lib/unbound/root.hints -p wa -k unbound-root-hints
 EOF
-    chmod 0600 /etc/audit/rules.d/99-pci-dss-cis.rules
-    chown root:root /etc/audit/rules.d/99-pci-dss-cis.rules
+    chmod 0640 /etc/audit/rules.d/50-unbound.rules
+    chown root:root /etc/audit/rules.d/50-unbound.rules
 
-    # 确保 /var/log/audit 目录权限正确
-    mkdir -p /var/log/audit
-    chmod 0700 /var/log/audit
-    chown root:root /var/log/audit
+    # 确保 auditd 已安装并尝试加载新规则
+    if systemctl is-active --quiet auditd 2>/dev/null; then
+        augenrules --load 2>/dev/null || warn "审计规则加载遇到问题（可能需要重启系统使 -e 2 锁定生效后重载）。"
+    fi
 
-    systemctl enable auditd
-    systemctl restart auditd 2>/dev/null || warn "auditd 重启遇到问题（将在重启后启动）"
-
-    info "auditd 内核审计已配置（CIS §4 / PCI-DSS Req 10）。"
+    info "Unbound DNS 专用审计规则已配置。"
 }
 
 
@@ -1974,8 +1709,6 @@ post_install_validation() {
 # 打印安装摘要
 ###############################################################################
 print_summary() {
-    local ssh_port
-    ssh_port="$(detect_ssh_port)"
     cat <<EOF
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1991,10 +1724,10 @@ print_summary() {
 ║    • DNS (UDP/TCP):  ${DNS_PORT}                                                    ║
 ║    • 远程控制:       8953 (仅限本地)                                         ║
 ║                                                                            ║
-║  防火墙已开放端口:                                                           ║
-║    • SSH:  $(printf '%-10s' "${ssh_port}/tcp") (速率限制)                                          ║
+║  防火墙已开放端口（本脚本管理）:                                               ║
 ║    • DNS:  53/tcp + 53/udp                                                  ║
 ║    • DoT:  853/tcp                                                          ║
+║    （SSH 端口由系统管理员单独管理）                                             ║
 ║                                                                            ║
 ║  注意: DoH (端口 443) 由 NGINX 反向代理提供                                  ║
 ║        请单独安装 NGINX 并由其安装脚本开放 443 端口                            ║
@@ -2016,7 +1749,7 @@ print_summary() {
 ║  安全特性:                                                                  ║
 ║    ✓ DNSSEC 验证已启用（含 val-max-restart 防护）                            ║
 ║    ✓ 速率限制（每 IP 和全局）                                                ║
-║    ✓ UFW 防火墙（基于 nftables 后端，最小权限端口开放）                       ║
+║    ✓ UFW 防火墙 DNS 规则（保留已有规则，不重置）                              ║
 ║    ✓ Fail2Ban DNS 滥用防护                                                  ║
 ║    ✓ Systemd 沙箱隔离（ProtectSystem, NoNewPrivileges 等）                  ║
 ║    ✓ QNAME 最小化 (RFC 7816)                                               ║
@@ -2024,11 +1757,12 @@ print_summary() {
 ║    ✓ 最小化响应（防放大攻击）                                                ║
 ║    ✓ deny-any 已启用                                                        ║
 ║    ✓ DNS 性能内核调优                                                        ║
-║    ✓ CIS 基准内核安全加固                                                    ║
-║    ✓ 登录横幅和核心转储限制                                                  ║
 ║    ✓ 365 天日志保留（PCI-DSS v4.0 Req 10.7.1）                              ║
-║    ✓ auditd 内核审计（CIS §4 / PCI-DSS Req 10 — 全面系统审计）              ║
+║    ✓ Unbound DNS 专用 auditd 审计规则                                       ║
 ║    ✓ 快速服务器选择优化                                                      ║
+║                                                                            ║
+║  注意: CIS/PCI-DSS 系统级加固（SSH、登录横幅、核心转储、禁用服务、             ║
+║        系统审计规则等）由系统管理员统一管理，不在本脚本范围内。                  ║
 ║                                                                            ║
 ║  备份位置: ${BACKUP_DIR}                         ║
 ║  安装日志: ${LOG_FILE}                                    ║
@@ -2036,80 +1770,6 @@ print_summary() {
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 EOF
-}
-
-###############################################################################
-# CIS 基准 - 禁用不必要的服务
-###############################################################################
-disable_unnecessary_services() {
-    info "正在检查并禁用不必要的服务（CIS 基准 2.1 / 2.2）..."
-
-    local services=(
-        avahi-daemon        # mDNS/DNS-SD - DNS 服务器不需要
-        cups                # 打印服务
-        isc-dhcp-server     # DHCP 服务器
-        slapd               # LDAP 服务器
-        nfs-server          # NFS 文件共享
-        rpcbind             # RPC 端口映射
-        rsync               # 远程同步服务
-        vsftpd              # FTP 服务器
-        apache2             # Web 服务器
-        squid               # 代理服务器
-        snmpd               # SNMP 监控
-        telnet.socket       # Telnet（不安全协议）
-    )
-
-    local disabled_count=0
-    for svc in "${services[@]}"; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null || \
-           systemctl is-enabled --quiet "$svc" 2>/dev/null; then
-            systemctl disable --now "$svc" 2>/dev/null || true
-            info "  已禁用: $svc"
-            disabled_count=$((disabled_count + 1))
-        fi
-    done
-
-    if [[ $disabled_count -eq 0 ]]; then
-        info "未检测到需要禁用的不必要服务。"
-    else
-        info "已禁用 ${disabled_count} 个不必要的服务。"
-    fi
-}
-
-###############################################################################
-# CIS 基准 - 登录横幅配置
-###############################################################################
-configure_login_banners() {
-    info "正在配置登录横幅（CIS 基准）..."
-
-    # 设置登录前横幅（CIS 1.7.1）
-    cat > /etc/issue <<'EOF'
-*******************************************************************************
-*                           授权访问警告                                       *
-*  未经授权的访问是被禁止的。所有活动都将被监控和记录。                            *
-*  继续使用即表示您同意接受安全监控和审计。                                       *
-*******************************************************************************
-EOF
-
-    cat > /etc/issue.net <<'EOF'
-*******************************************************************************
-*                           授权访问警告                                       *
-*  未经授权的访问是被禁止的。所有活动都将被监控和记录。                            *
-*  继续使用即表示您同意接受安全监控和审计。                                       *
-*******************************************************************************
-EOF
-
-    # 设置登录后横幅 (MOTD)
-    cat > /etc/motd <<'EOF'
-=== 企业级 Unbound DNS 服务器 ===
-所有操作均受安全监控。仅限授权管理员使用。
-EOF
-
-    # 设置文件权限（CIS 1.7.4 - 1.7.6）
-    chown root:root /etc/issue /etc/issue.net /etc/motd
-    chmod 644 /etc/issue /etc/issue.net /etc/motd
-
-    info "登录横幅配置完成。"
 }
 
 ###############################################################################
@@ -2127,17 +1787,16 @@ uninstall_unbound() {
         info "  1.  停止并禁用 Unbound 服务"
         info "  2.  停止并禁用相关定时器（根提示/信任锚更新）"
         info "  3.  移除 Fail2Ban DNS 防护规则"
-        info "  4.  移除 UFW 防火墙中的 DNS 和 DoT 规则（保留 SSH 规则）"
+        info "  4.  移除 UFW 防火墙中的 DNS 和 DoT 规则（保留其他规则）"
         info "  5.  移除 Unbound 相关的 sysctl 调优"
         info "  6.  移除 Unbound 日志轮转配置"
-        info "  7.  移除 Unbound auditd 审计规则"
+        info "  7.  移除 Unbound DNS 专用 auditd 审计规则"
         info "  8.  移除 systemd 服务加固配置和 tmpfiles 配置"
         info "  9.  移除监控和健康检查脚本"
         info "  10. 卸载 Unbound 软件包"
         info "  11. 清理配置文件和日志目录"
-        info "  12. 移除核心转储限制配置"
-        info "  13. 清理 AppArmor 本地规则"
-        info "  14. 恢复 resolv.conf 至公共 DNS"
+        info "  12. 清理 AppArmor 本地规则"
+        info "  13. 恢复 resolv.conf 至公共 DNS"
         exit 0
     fi
 
@@ -2193,9 +1852,9 @@ uninstall_unbound() {
     ufw delete allow 53/tcp 2>/dev/null || true
     ufw delete allow 53/udp 2>/dev/null || true
     ufw delete allow 853/tcp 2>/dev/null || true
-    # 注意: 仅移除 DNS 和 DoT 规则，SSH 规则保持不变以确保远程管理不受影响
+    # 注意: 仅移除 DNS 和 DoT 规则，其他规则（包括 SSH）保持不变
     # DoH(443) 由 NGINX 脚本管理，此处不移除
-    info "  DNS 和 DoT 防火墙规则已移除（SSH 规则保持不变）。"
+    info "  DNS 和 DoT 防火墙规则已移除（其他规则保持不变）。"
 
     info "步骤 5: 移除 Unbound 相关的 sysctl 调优..."
     rm -f /etc/sysctl.d/99-unbound-dns.conf
@@ -2206,12 +1865,12 @@ uninstall_unbound() {
     rm -f /etc/logrotate.d/unbound
     info "  日志轮转配置已移除。"
 
-    info "步骤 7: 移除 Unbound auditd 审计规则..."
-    rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
+    info "步骤 7: 移除 Unbound DNS 专用 auditd 审计规则..."
+    rm -f /etc/audit/rules.d/50-unbound.rules
     if systemctl is-active --quiet auditd 2>/dev/null; then
         augenrules --load 2>/dev/null || true
     fi
-    info "  auditd 审计规则已移除。"
+    info "  Unbound DNS 专用审计规则已移除。"
 
     info "步骤 8: 移除 systemd 服务加固配置..."
     rm -rf /etc/systemd/system/unbound.service.d
@@ -2241,13 +1900,7 @@ uninstall_unbound() {
     rm -rf /run/unbound
     info "  配置和日志目录已清理。"
 
-    info "步骤 12: 移除核心转储限制配置..."
-    rm -f /etc/security/limits.d/99-disable-coredumps.conf
-    rm -f /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
-    rmdir /etc/systemd/coredump.conf.d 2>/dev/null || true
-    info "  核心转储限制配置已移除。"
-
-    info "步骤 13: 清理 AppArmor 本地规则..."
+    info "步骤 12: 清理 AppArmor 本地规则..."
     local apparmor_local="/etc/apparmor.d/local/usr.sbin.unbound"
     local marker_begin="# BEGIN Unbound install script rules"
     local marker_end="# END Unbound install script rules"
@@ -2261,7 +1914,7 @@ uninstall_unbound() {
         info "  未检测到需要清理的 AppArmor 规则。"
     fi
 
-    info "步骤 14: 恢复 resolv.conf..."
+    info "步骤 13: 恢复 resolv.conf..."
     chattr -i /etc/resolv.conf 2>/dev/null || true
     cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
@@ -2455,24 +2108,24 @@ main() {
         info "  1.  安装前环境检查（root 权限、系统版本、内存、网络）"
         info "  2.  备份现有配置文件"
         info "  3.  安装必需的软件包（unbound, fail2ban 等）"
-        info "  4.  应用 DNS 性能调优和 CIS 内核安全加固"
+        info "  4.  应用 DNS 性能调优"
         info "  5.  创建 Unbound 用户和目录结构"
         info "  6.  配置 DNSSEC 信任锚和根提示文件"
         info "  7.  生成 Unbound 主配置文件（仅 DNS 端口 53，清理旧配置）"
         info "  8.  配置域名黑名单/RPZ"
-        info "  9.  配置 UFW 防火墙规则"
+        info "  9.  配置 UFW 防火墙 DNS 规则（保留已有规则）"
         info "  10. 配置 Fail2Ban DNS 滥用防护"
         info "  11. 配置日志轮转（365 天保留，PCI-DSS v4.0 合规）"
-        info "  12. 配置 auditd 内核审计（CIS §4 / PCI-DSS Req 10）"
+        info "  12. 配置 Unbound DNS 专用 auditd 审计规则"
         info "  13. 应用 Systemd 服务安全加固"
         info "  14. 创建监控和健康检查脚本及 systemd 定时器"
-        info "  15. 禁用不必要的服务（CIS 基准）"
-        info "  16. 配置登录横幅"
-        info "  17. 验证配置文件语法"
-        info "  18. 启动 Unbound 服务"
-        info "  19. 运行安装后验证测试"
+        info "  15. 验证配置文件语法"
+        info "  16. 启动 Unbound 服务"
+        info "  17. 运行安装后验证测试"
         info ""
-        info "注意: DoH (端口 443) 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
+        info "注意: CIS/PCI-DSS 系统级加固（SSH、登录横幅、核心转储、禁用服务等）"
+        info "      假定已由系统管理员统一管理，本脚本仅配置 DNS 相关组件。"
+        info "      DoH (端口 443) 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
     fi
 
@@ -2493,11 +2146,9 @@ main() {
     configure_firewall
     configure_fail2ban
     configure_logrotate
-    configure_auditd
+    configure_unbound_audit
     harden_systemd_service
     create_monitoring_scripts
-    disable_unnecessary_services
-    configure_login_banners
     validate_config
     start_unbound
     post_install_validation
