@@ -598,11 +598,14 @@ setup_dnssec() {
             else
                 warn "下载的文件内容无效（未包含 ${ROOT_HINTS_MARKER}），使用系统默认值。"
                 cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
+                rm -f "$root_hints_tmp"
             fi
         else
             warn "无法下载根提示文件或文件为空，使用系统默认值。"
             cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
+            rm -f "$root_hints_tmp"
         fi
+        trap - RETURN   # 临时文件已处理完毕，清除 RETURN 陷阱防止泄漏到调用者
     else
         warn "无法创建临时文件，使用系统默认根提示。"
         cp /usr/share/dns/root.hints "$root_hints" 2>/dev/null || true
@@ -1779,6 +1782,7 @@ nameserver ::1
 options edns0 trust-ad
 EOF
         mv -f "$resolv_tmp" /etc/resolv.conf
+        trap - RETURN   # 临时文件已移走，清除 RETURN 陷阱防止泄漏到调用者
         # 设置不可变属性防止 DHCP 或 networkd 覆盖
         chattr +i /etc/resolv.conf 2>/dev/null || true
         info "已更新 resolv.conf 指向本地 DNS（已设置不可变属性）"
