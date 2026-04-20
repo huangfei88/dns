@@ -806,7 +806,7 @@ sudo ss -tlnp | grep -E ':(443|853)\s'
 # Check if Unbound DoH backend is listening on 8443
 sudo ss -tlnp | grep ':8443\s'
 
-# Test Unbound DoH backend directly (bypassing NGINX, wire format GET)
+# Test Unbound DoH backend directly (bypassing NGINX, wire format GET, queries example.com A)
 curl -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
     od -A x -t x1
 

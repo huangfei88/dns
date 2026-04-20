@@ -805,7 +805,7 @@ sudo ss -tlnp | grep -E ':(443|853)\s'
 # 检查 Unbound DoH 后端是否在 8443 端口监听
 sudo ss -tlnp | grep ':8443\s'
 
-# 直接测试 Unbound DoH 后端（绕过 NGINX，使用线格式 GET）
+# 直接测试 Unbound DoH 后端（绕过 NGINX，使用线格式 GET，查询 example.com A 记录）
 curl -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
     od -A x -t x1
 
