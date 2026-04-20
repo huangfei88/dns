@@ -13,7 +13,7 @@
 - **QNAME 最小化查询**（RFC 7816），保护上游隐私
 - **0x20 查询随机化**，防止欺骗攻击
 - **速率限制**（按 IP 和全局），自动封禁恶意请求
-- **UFW 防火墙**（nftables 后端），默认拒绝策略，SSH 速率限制
+- **UFW 防火墙**（nftables 后端），默认拒绝策略
 - **Fail2Ban** 集成，防御 DNS 滥用
 - **Systemd 沙箱**（ProtectSystem、NoNewPrivileges、MemoryDenyWriteExecute 等）
 - **deny-any** 防止放大攻击
@@ -30,11 +30,11 @@
 - 适配低内存环境的保守缓存配置
 
 ### 合规性
-- **CIS 基准**加固（内核、文件系统、服务、登录横幅、核心转储限制）
-- **PCI-DSS** 合规（TLS 1.2+、审计日志、365 天日志保留、访问控制）
-- 全面的审计日志
-- 登录横幅和访问限制
-- 禁用不必要的服务
+- **PCI-DSS** 合规（通过 NGINX 代理实现 TLS 1.2+、审计日志、365 天日志保留、访问控制）
+- 全面的审计日志（Unbound DNS 专用 auditd 规则）
+- DNS 配置和 DNSSEC 变更监控
+
+> **注意**：CIS 基准系统级加固（内核参数、登录横幅、核心转储限制、禁用不必要的服务等）假定已由系统管理员统一管理。本脚本仅负责 Unbound DNS 相关组件。
 
 ### 监控与维护
 - 健康检查脚本（`/usr/local/bin/unbound-health-check`）
@@ -153,8 +153,7 @@ sudo ./install_unbound.sh --dry-run
 | `/etc/unbound/unbound.conf.d/03-doh.conf` | DoH 后端（localhost:8443，随 NGINX 添加） |
 | `/etc/unbound/unbound.conf.d/04-blocklist.conf` | 响应策略 / 域名黑名单 |
 | `/etc/unbound/blocklist.conf` | 自定义域名黑名单条目 |
-| `/etc/sysctl.d/99-unbound-dns.conf` | DNS 性能 + CIS 内核安全调优 |
-| `/etc/security/limits.d/99-disable-coredumps.conf` | 核心转储限制 |
+| `/etc/sysctl.d/99-unbound-dns.conf` | DNS 服务器网络性能调优 |
 
 ## 管理命令
 
@@ -210,14 +209,27 @@ dig @<server-ip> dnssec-failed.org A  # 应返回 SERVFAIL
 
 ## 安全加固概要
 
-### CIS 基准控制
-- [x] 内核加固（IP 转发、源路由、ICMP 重定向、SYN cookies）
-- [x] 核心转储限制
-- [x] 文件权限加固
-- [x] 禁用不必要的服务（avahi、cups、rpcbind 等）
-- [x] 登录横幅（登录前和登录后）
-- [x] 启用 ASLR
-- [x] BPF 和 ptrace 限制
+### DNS 专用安全（由本脚本管理）
+- [x] DNSSEC 验证及自动信任锚管理
+- [x] 速率限制（按 IP 和全局）及 Fail2Ban 集成
+- [x] UFW 防火墙 DNS 规则（默认拒绝、增量添加、保留已有规则）
+- [x] Systemd 沙箱（ProtectSystem、NoNewPrivileges、MemoryDenyWriteExecute 等）
+- [x] 隐藏服务器标识和版本信息
+- [x] QNAME 最小化查询（RFC 7816）
+- [x] 0x20 查询随机化
+- [x] deny-any 防止放大攻击
+- [x] 最小化响应，减少攻击面
+- [x] 文件权限加固（配置文件、密钥、日志）
+- [x] Unbound DNS 专用 auditd 审计规则
+- [x] 365 天日志保留（PCI-DSS v4.0 要求 10.7.1）
+
+### 系统级加固（由系统管理员另行管理）
+- [ ] 内核加固（IP 转发、源路由、ICMP 重定向、SYN cookies、ASLR）
+- [ ] 核心转储限制
+- [ ] 禁用不必要的服务（avahi、cups、rpcbind 等）
+- [ ] 登录横幅（登录前和登录后）
+- [ ] BPF 和 ptrace 限制
+- [ ] SSH 加固和访问控制
 
 ### PCI-DSS 要求
 - [x] 通过 NGINX 代理实现加密 DNS 的 TLS 1.2+（要求 4.1）
@@ -320,15 +332,16 @@ sudo ./install_unbound.sh
 
 脚本将自动完成以下操作：
 1. 安装所有必需的软件包（Unbound、Fail2Ban、UFW 等）
-2. 应用内核安全加固（CIS 基准 + DNS 性能调优）
+2. 应用 DNS 服务器网络性能调优（sysctl）
 3. 配置 DNSSEC 及自动根信任锚管理
 4. 根据虚拟机规格优化 Unbound 配置
-5. 配置 UFW 防火墙默认拒绝策略
+5. 配置 UFW 防火墙默认拒绝策略（仅 DNS 规则，保留已有规则）
 6. 设置 Fail2Ban 防御 DNS 滥用
 7. 应用 systemd 沙箱加固
 8. 创建监控脚本和维护定时器
-9. 验证配置并启动服务
-10. 运行安装后健康检查
+9. 配置 Unbound DNS 专用 auditd 审计规则
+10. 验证配置并启动服务
+11. 运行安装后健康检查
 
 > **提示**：安装日志保存在 `/var/log/unbound-install.log`。如有问题，请首先检查此文件。
 
@@ -996,8 +1009,6 @@ sudo rm -rf /etc/unbound
 sudo rm -rf /var/log/unbound
 sudo rm -rf /var/lib/unbound
 sudo rm -f /etc/sysctl.d/99-unbound-dns.conf
-sudo rm -f /etc/security/limits.d/99-disable-coredumps.conf
-sudo rm -f /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
 sudo rm -f /etc/fail2ban/jail.d/unbound-dns.conf
 sudo rm -f /etc/fail2ban/filter.d/unbound-dns-abuse.conf
 sudo rm -rf /etc/systemd/system/unbound.service.d
@@ -1009,7 +1020,7 @@ sudo rm -f /usr/local/bin/unbound-stats
 sudo rm -f /usr/local/bin/update-root-hints
 sudo rm -f /usr/local/bin/update-trust-anchor
 sudo rm -f /etc/logrotate.d/unbound
-sudo rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
+sudo rm -f /etc/audit/rules.d/50-unbound.rules
 
 # 重载 systemd
 sudo systemctl daemon-reload
