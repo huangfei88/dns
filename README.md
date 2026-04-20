@@ -120,7 +120,7 @@ Examples:
               │           ┌──────┴───────────────────┘
               │           │  NGINX Reverse Proxy
               │           │  ┌─ stream:853 → TCP proxy ─┐
-              │           │  └─ http:443 → proxy_pass  ──┘
+              │           │  └─ http:443 → grpc_pass h2c ──┘
               │           └──────┬──────────────┘
               │                  │
               └──────────────────┤
@@ -532,7 +532,7 @@ sudo sed -i 's/dns.example.com/YOUR_ACTUAL_DOMAIN/g' /etc/nginx/stream.conf.d/dn
 
 #### 6.5 Configure NGINX for DoH (DNS-over-HTTPS) / 配置 DoH
 
-DoH uses NGINX's `http` module to terminate HTTPS on port 443 and proxy HTTP requests to Unbound's built-in HTTP endpoint.
+DoH uses NGINX's `http` module to terminate HTTPS on port 443 and proxy requests to Unbound's built-in HTTP/2 endpoint. Since Unbound's DoH module (based on libnghttp2) **strictly requires HTTP/2** and will reject HTTP/1.1 connections, we use NGINX's `grpc_pass` directive which establishes HTTP/2 cleartext (h2c) connections to the backend.
 
 **Step 1: Enable Unbound's DoH backend**
 
@@ -609,25 +609,22 @@ server {
 
     # DoH endpoint (RFC 8484)
     location /dns-query {
-        # Proxy to Unbound's local DoH backend (no TLS, handled by NGINX)
-        proxy_pass http://127.0.0.1:8443/dns-query;
+        # Use grpc_pass for HTTP/2 cleartext (h2c) to Unbound's DoH backend.
+        # Unbound's DoH module (libnghttp2) strictly requires HTTP/2 and will
+        # reject HTTP/1.1 connections. NGINX's proxy_pass only supports HTTP/1.x,
+        # so grpc_pass is used to establish an h2c connection to the backend.
+        grpc_pass grpc://127.0.0.1:8443;
 
-        # HTTP settings
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-
-        # Required content types for DoH (RFC 8484)
-        # GET requests use ?dns= parameter, POST requests use application/dns-message body
-        proxy_set_header Accept "application/dns-message";
+        # Override default gRPC Content-Type (application/grpc) to preserve
+        # the client's original Content-Type for DoH (application/dns-message)
+        grpc_set_header Content-Type $content_type;
+        grpc_set_header Host $host;
+        grpc_set_header X-Real-IP $remote_addr;
 
         # Timeout settings
-        proxy_connect_timeout 5s;
-        proxy_send_timeout 10s;
-        proxy_read_timeout 10s;
-
-        # Disable buffering for low-latency DNS responses
-        proxy_buffering off;
+        grpc_connect_timeout 5s;
+        grpc_send_timeout 10s;
+        grpc_read_timeout 10s;
 
         # Limit request body size (DNS messages are small, max 512 bytes typical)
         client_max_body_size 4k;
@@ -807,7 +804,8 @@ sudo ss -tlnp | grep -E ':(443|853)\s'
 sudo ss -tlnp | grep ':8443\s'
 
 # Test Unbound DoH backend directly (bypassing NGINX, wire format GET, queries example.com A)
-curl -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
+# Note: --http2-prior-knowledge is required because Unbound's DoH only accepts HTTP/2 (h2c)
+curl --http2-prior-knowledge -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
     od -A x -t x1
 
 # Check TLS certificate validity
@@ -832,6 +830,7 @@ kdig @dns.example.com +tls +tls-host=dns.example.com -d example.com A
 **Common issues:**
 - **"Connection refused" on port 853**: Ensure NGINX is running and the stream config is loaded. Check that the `include stream.conf.d/*.conf;` line is OUTSIDE the `http {}` block.
 - **"502 Bad Gateway" on DoH**: Ensure Unbound is listening on port 8443. Run `unbound-checkconf` and check for `https-port` errors. If `http-notls-downstream` is not recognized, your Unbound version may be too old.
+- **DoH direct test fails with "curl: (56) Recv failure"**: Unbound's DoH module (libnghttp2) strictly requires HTTP/2. When testing directly (bypassing NGINX), you must use `curl --http2-prior-knowledge`. Standard `curl` uses HTTP/1.1 which Unbound will immediately reject.
 - **Certificate errors**: Run `sudo certbot certificates` to check certificate status. Ensure the domain matches.
 - **"SSL handshake failed"**: Check that `ssl_protocols` and `ssl_ciphers` in NGINX match what the client supports.
 
