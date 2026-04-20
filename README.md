@@ -72,9 +72,14 @@ sudo ./install_unbound.sh --dry-run
 ## Usage
 
 ```
-Usage: sudo install_unbound.sh [OPTIONS]
+Usage: sudo install_unbound.sh [COMMAND] [OPTIONS]
 
-Optional:
+Commands:
+  install               Install and configure Unbound DNS server (default)
+  uninstall             Uninstall Unbound DNS server and clean up all configurations
+  update                Update Unbound packages, root hints, and trust anchor
+
+Options:
   --dry-run             Show what would be done without making changes
   -h, --help            Show this help message
   -v, --version         Show script version
@@ -84,6 +89,13 @@ Note:
   installed NGINX reverse proxy. TLS certificates are provisioned during NGINX
   installation. This script only configures Unbound as a recursive DNS resolver
   on port 53.
+
+Examples:
+  sudo ./install_unbound.sh                 # Default: install
+  sudo ./install_unbound.sh install         # Install Unbound
+  sudo ./install_unbound.sh uninstall       # Uninstall Unbound
+  sudo ./install_unbound.sh update          # Update Unbound
+  sudo ./install_unbound.sh install --dry-run
 ```
 
 ## Architecture
@@ -795,8 +807,9 @@ sudo ss -tlnp | grep -E ':(443|853)\s'
 # Check if Unbound DoH backend is listening on 8443
 sudo ss -tlnp | grep ':8443\s'
 
-# Test Unbound DoH backend directly (bypassing NGINX)
-curl -sSf http://127.0.0.1:8443/dns-query?name=example.com&type=A
+# Test Unbound DoH backend directly (bypassing NGINX, wire format GET)
+curl -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
+    od -A x -t x1
 
 # Check TLS certificate validity
 sudo certbot certificates
@@ -948,7 +961,22 @@ sudo systemctl start unbound
 
 ### Uninstallation / 卸载
 
-To completely remove Unbound and all configurations:
+**Recommended: Use the built-in uninstall command:**
+
+```bash
+# Preview what will be removed (dry run)
+sudo ./install_unbound.sh uninstall --dry-run
+
+# Perform full uninstallation
+sudo ./install_unbound.sh uninstall
+```
+
+The built-in uninstall command automatically handles all cleanup steps including stopping services, removing configurations, cleaning up firewall rules, and restoring DNS settings.
+
+<details>
+<summary>Alternative: Manual uninstallation steps</summary>
+
+To manually remove Unbound and all configurations:
 
 ```bash
 # Stop and disable services
@@ -972,9 +1000,10 @@ sudo rm -rf /var/log/unbound
 sudo rm -rf /var/lib/unbound
 sudo rm -f /etc/sysctl.d/99-unbound-dns.conf
 sudo rm -f /etc/security/limits.d/99-disable-coredumps.conf
+sudo rm -f /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
 sudo rm -f /etc/fail2ban/jail.d/unbound-dns.conf
 sudo rm -f /etc/fail2ban/filter.d/unbound-dns-abuse.conf
-sudo rm -f /etc/systemd/system/unbound.service.d/hardening.conf
+sudo rm -rf /etc/systemd/system/unbound.service.d
 sudo rm -f /etc/systemd/system/update-root-hints.*
 sudo rm -f /etc/systemd/system/update-trust-anchor.*
 sudo rm -f /etc/tmpfiles.d/unbound.conf
@@ -983,6 +1012,7 @@ sudo rm -f /usr/local/bin/unbound-stats
 sudo rm -f /usr/local/bin/update-root-hints
 sudo rm -f /usr/local/bin/update-trust-anchor
 sudo rm -f /etc/logrotate.d/unbound
+sudo rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
 
 # Reload systemd
 sudo systemctl daemon-reload
@@ -990,6 +1020,8 @@ sudo systemctl daemon-reload
 # Re-apply sysctl defaults
 sudo sysctl --system
 ```
+
+</details>
 
 ## License
 

@@ -2127,7 +2127,9 @@ uninstall_unbound() {
         info "  9.  移除监控和健康检查脚本"
         info "  10. 卸载 Unbound 软件包"
         info "  11. 清理配置文件和日志目录"
-        info "  12. 恢复 resolv.conf 至公共 DNS"
+        info "  12. 移除核心转储限制配置"
+        info "  13. 清理 AppArmor 本地规则"
+        info "  14. 恢复 resolv.conf 至公共 DNS"
         exit 0
     fi
 
@@ -2229,7 +2231,27 @@ uninstall_unbound() {
     rm -rf /run/unbound
     info "  配置和日志目录已清理。"
 
-    info "步骤 12: 恢复 resolv.conf..."
+    info "步骤 12: 移除核心转储限制配置..."
+    rm -f /etc/security/limits.d/99-disable-coredumps.conf
+    rm -f /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
+    rmdir /etc/systemd/coredump.conf.d 2>/dev/null || true
+    info "  核心转储限制配置已移除。"
+
+    info "步骤 13: 清理 AppArmor 本地规则..."
+    local apparmor_local="/etc/apparmor.d/local/usr.sbin.unbound"
+    local marker_begin="# BEGIN Unbound install script rules"
+    local marker_end="# END Unbound install script rules"
+    if [[ -f "$apparmor_local" ]] && grep -qF "$marker_begin" "$apparmor_local" 2>/dev/null; then
+        sed -i "/${marker_begin}/,/${marker_end}/d" "$apparmor_local"
+        if command -v apparmor_parser &>/dev/null; then
+            apparmor_parser -r /etc/apparmor.d/usr.sbin.unbound 2>/dev/null || true
+        fi
+        info "  AppArmor 本地规则已清理。"
+    else
+        info "  未检测到需要清理的 AppArmor 规则。"
+    fi
+
+    info "步骤 14: 恢复 resolv.conf..."
     chattr -i /etc/resolv.conf 2>/dev/null || true
     cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
