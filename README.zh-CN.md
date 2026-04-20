@@ -50,7 +50,7 @@
 - **网络**：公网 IP 地址，端口 53 开放（如使用 NGINX 代理 DoT/DoH，还需开放 443/853 端口）
 - **权限**：Root 访问权限（sudo）
 
-> **注意**：DNS-over-TLS（DoT，端口 853）和 DNS-over-HTTPS（DoH，端口 443）由单独安装的 NGINX 反向代理处理。TLS 证书在 NGINX 安装时配置。本脚本仅将 Unbound 配置为端口 53 上的递归 DNS 解析器。
+> **注意**：DNS-over-TLS（DoT，端口 853）和 DNS-over-HTTPS（DoH，端口 443）由单独安装的 NGINX 反向代理处理。TLS 证书在 NGINX 安装时配置。本脚本将 Unbound 配置为端口 53 上的递归 DNS 解析器，并自动放通 DoT 防火墙端口（853）。DoH 端口（443）由 NGINX 安装脚本放通。
 
 ## 快速开始
 
@@ -72,18 +72,29 @@ sudo ./install_unbound.sh --dry-run
 ## 用法
 
 ```
-Usage: sudo install_unbound.sh [OPTIONS]
+用法: sudo install_unbound.sh [命令] [选项]
 
-Optional:
-  --dry-run             Show what would be done without making changes
-  -h, --help            Show this help message
-  -v, --version         Show script version
+命令:
+  install               安装并配置 Unbound DNS 服务器（默认）
+  uninstall             卸载 Unbound DNS 服务器并清理所有配置
+  update                更新 Unbound 软件包、根提示文件和信任锚
 
-Note:
-  DoT (DNS-over-TLS) and DoH (DNS-over-HTTPS) are handled by a separately
-  installed NGINX reverse proxy. TLS certificates are provisioned during NGINX
-  installation. This script only configures Unbound as a recursive DNS resolver
-  on port 53.
+选项:
+  --dry-run             仅显示将要执行的操作，不做任何更改
+  -h, --help            显示帮助信息
+  -v, --version         显示脚本版本
+
+注意:
+  DoT (DNS-over-TLS, 端口 853) 防火墙端口由本脚本放通。
+  DoH (DNS-over-HTTPS, 端口 443) 由单独安装的 NGINX 放通。
+  TLS 证书在 NGINX 安装时配置。本脚本配置 Unbound 为端口 53 上的递归 DNS 解析器。
+
+示例:
+  sudo ./install_unbound.sh                 # 默认执行安装
+  sudo ./install_unbound.sh install         # 安装 Unbound
+  sudo ./install_unbound.sh uninstall       # 卸载 Unbound
+  sudo ./install_unbound.sh update          # 更新 Unbound
+  sudo ./install_unbound.sh install --dry-run
 ```
 
 ## 架构
@@ -378,9 +389,8 @@ dig @<server-ip> example.com A | grep "Query time"
 
 DNS-over-TLS（DoT，端口 853）和 DNS-over-HTTPS（DoH，端口 443）由 NGINX 作为 Unbound 前端的反向代理提供。本节提供完整的生产级配置。
 
-> 安装脚本**不会**开放端口 853 或 443（遵循最小权限原则）。启动 NGINX 之前，请先开放这些端口：
+> 安装脚本已自动放通端口 853（DoT）的防火墙规则。启动 NGINX 之前，仅需手动放通端口 443（DoH）：
 > ```bash
-> sudo ufw allow 853/tcp
 > sudo ufw allow 443/tcp
 > ```
 
@@ -795,8 +805,9 @@ sudo ss -tlnp | grep -E ':(443|853)\s'
 # 检查 Unbound DoH 后端是否在 8443 端口监听
 sudo ss -tlnp | grep ':8443\s'
 
-# 直接测试 Unbound DoH 后端（绕过 NGINX）
-curl -sSf http://127.0.0.1:8443/dns-query?name=example.com&type=A
+# 直接测试 Unbound DoH 后端（绕过 NGINX，使用线格式 GET，查询 example.com A 记录）
+curl -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
+    od -A x -t x1
 
 # 检查 TLS 证书有效性
 sudo certbot certificates
@@ -948,7 +959,22 @@ sudo systemctl start unbound
 
 ### 卸载
 
-要完全删除 Unbound 及所有配置：
+**推荐：使用内置卸载命令：**
+
+```bash
+# 预览将要移除的内容（试运行）
+sudo ./install_unbound.sh uninstall --dry-run
+
+# 执行完整卸载
+sudo ./install_unbound.sh uninstall
+```
+
+内置卸载命令会自动处理所有清理步骤，包括停止服务、移除配置、清理防火墙规则和恢复 DNS 设置。
+
+<details>
+<summary>替代方案：手动卸载步骤</summary>
+
+手动删除 Unbound 及所有配置：
 
 ```bash
 # 停止并禁用服务
@@ -972,9 +998,10 @@ sudo rm -rf /var/log/unbound
 sudo rm -rf /var/lib/unbound
 sudo rm -f /etc/sysctl.d/99-unbound-dns.conf
 sudo rm -f /etc/security/limits.d/99-disable-coredumps.conf
+sudo rm -f /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
 sudo rm -f /etc/fail2ban/jail.d/unbound-dns.conf
 sudo rm -f /etc/fail2ban/filter.d/unbound-dns-abuse.conf
-sudo rm -f /etc/systemd/system/unbound.service.d/hardening.conf
+sudo rm -rf /etc/systemd/system/unbound.service.d
 sudo rm -f /etc/systemd/system/update-root-hints.*
 sudo rm -f /etc/systemd/system/update-trust-anchor.*
 sudo rm -f /etc/tmpfiles.d/unbound.conf
@@ -983,6 +1010,7 @@ sudo rm -f /usr/local/bin/unbound-stats
 sudo rm -f /usr/local/bin/update-root-hints
 sudo rm -f /usr/local/bin/update-trust-anchor
 sudo rm -f /etc/logrotate.d/unbound
+sudo rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
 
 # 重载 systemd
 sudo systemctl daemon-reload
@@ -990,6 +1018,8 @@ sudo systemctl daemon-reload
 # 重新应用 sysctl 默认值
 sudo sysctl --system
 ```
+
+</details>
 
 ## 许可证
 

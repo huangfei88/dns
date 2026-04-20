@@ -50,7 +50,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - **Network**: Public IP address with port 53 open (ports 443/853 needed if NGINX proxy is used for DoT/DoH)
 - **Privileges**: Root access (sudo)
 
-> **Note**: DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are handled by a separately installed NGINX reverse proxy. TLS certificates are provisioned during the NGINX installation. This script only configures Unbound as a recursive DNS resolver on port 53.
+> **Note**: DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are handled by a separately installed NGINX reverse proxy. TLS certificates are provisioned during the NGINX installation. This script configures Unbound as a recursive DNS resolver on port 53 and opens the DoT firewall port (853). The DoH port (443) is opened by the NGINX install script.
 
 ## Quick Start
 
@@ -72,18 +72,30 @@ sudo ./install_unbound.sh --dry-run
 ## Usage
 
 ```
-Usage: sudo install_unbound.sh [OPTIONS]
+Usage: sudo install_unbound.sh [COMMAND] [OPTIONS]
 
-Optional:
+Commands:
+  install               Install and configure Unbound DNS server (default)
+  uninstall             Uninstall Unbound DNS server and clean up all configurations
+  update                Update Unbound packages, root hints, and trust anchor
+
+Options:
   --dry-run             Show what would be done without making changes
   -h, --help            Show this help message
   -v, --version         Show script version
 
 Note:
-  DoT (DNS-over-TLS) and DoH (DNS-over-HTTPS) are handled by a separately
-  installed NGINX reverse proxy. TLS certificates are provisioned during NGINX
-  installation. This script only configures Unbound as a recursive DNS resolver
-  on port 53.
+  DoT (DNS-over-TLS, port 853) firewall port is opened by this script.
+  DoH (DNS-over-HTTPS, port 443) is opened by the separate NGINX install script.
+  TLS certificates are provisioned during NGINX installation.
+  This script configures Unbound as a recursive DNS resolver on port 53.
+
+Examples:
+  sudo ./install_unbound.sh                 # Default: install
+  sudo ./install_unbound.sh install         # Install Unbound
+  sudo ./install_unbound.sh uninstall       # Uninstall Unbound
+  sudo ./install_unbound.sh update          # Update Unbound
+  sudo ./install_unbound.sh install --dry-run
 ```
 
 ## Architecture
@@ -378,9 +390,8 @@ dig @<server-ip> example.com A | grep "Query time"
 
 DNS-over-TLS (DoT, port 853) and DNS-over-HTTPS (DoH, port 443) are provided by NGINX as a reverse proxy in front of Unbound. This section provides complete, production-ready configuration.
 
-> The install script does **not** open ports 853 or 443 (it follows the principle of least privilege). Before starting NGINX, open them with:
+> The install script already opens port 853 (DoT) in the firewall. Only port 443 (DoH) needs to be opened separately before starting NGINX:
 > ```bash
-> sudo ufw allow 853/tcp
 > sudo ufw allow 443/tcp
 > ```
 
@@ -795,8 +806,9 @@ sudo ss -tlnp | grep -E ':(443|853)\s'
 # Check if Unbound DoH backend is listening on 8443
 sudo ss -tlnp | grep ':8443\s'
 
-# Test Unbound DoH backend directly (bypassing NGINX)
-curl -sSf http://127.0.0.1:8443/dns-query?name=example.com&type=A
+# Test Unbound DoH backend directly (bypassing NGINX, wire format GET, queries example.com A)
+curl -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
+    od -A x -t x1
 
 # Check TLS certificate validity
 sudo certbot certificates
@@ -948,7 +960,22 @@ sudo systemctl start unbound
 
 ### Uninstallation / 卸载
 
-To completely remove Unbound and all configurations:
+**Recommended: Use the built-in uninstall command:**
+
+```bash
+# Preview what will be removed (dry run)
+sudo ./install_unbound.sh uninstall --dry-run
+
+# Perform full uninstallation
+sudo ./install_unbound.sh uninstall
+```
+
+The built-in uninstall command automatically handles all cleanup steps including stopping services, removing configurations, cleaning up firewall rules, and restoring DNS settings.
+
+<details>
+<summary>Alternative: Manual uninstallation steps</summary>
+
+To manually remove Unbound and all configurations:
 
 ```bash
 # Stop and disable services
@@ -972,9 +999,10 @@ sudo rm -rf /var/log/unbound
 sudo rm -rf /var/lib/unbound
 sudo rm -f /etc/sysctl.d/99-unbound-dns.conf
 sudo rm -f /etc/security/limits.d/99-disable-coredumps.conf
+sudo rm -f /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
 sudo rm -f /etc/fail2ban/jail.d/unbound-dns.conf
 sudo rm -f /etc/fail2ban/filter.d/unbound-dns-abuse.conf
-sudo rm -f /etc/systemd/system/unbound.service.d/hardening.conf
+sudo rm -rf /etc/systemd/system/unbound.service.d
 sudo rm -f /etc/systemd/system/update-root-hints.*
 sudo rm -f /etc/systemd/system/update-trust-anchor.*
 sudo rm -f /etc/tmpfiles.d/unbound.conf
@@ -983,6 +1011,7 @@ sudo rm -f /usr/local/bin/unbound-stats
 sudo rm -f /usr/local/bin/update-root-hints
 sudo rm -f /usr/local/bin/update-trust-anchor
 sudo rm -f /etc/logrotate.d/unbound
+sudo rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
 
 # Reload systemd
 sudo systemctl daemon-reload
@@ -990,6 +1019,8 @@ sudo systemctl daemon-reload
 # Re-apply sysctl defaults
 sudo sysctl --system
 ```
+
+</details>
 
 ## License
 
