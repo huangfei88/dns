@@ -1706,11 +1706,15 @@ validate_config() {
 }
 
 ###############################################################################
-# 检查端口 53 是否被占用
+# 检查端口 53 是否被非 Unbound 进程占用
 ###############################################################################
 is_port53_in_use() {
     # 使用 [^0-9] 确保精确匹配端口 53（不匹配 530/5353 等）
-    ss -tlnp 2>/dev/null | grep -qE ':53([^0-9]|$)' || ss -ulnp 2>/dev/null | grep -qE ':53([^0-9]|$)'
+    # 排除 unbound 自身进程，仅检测其他冲突服务（如 systemd-resolved、dnsmasq、bind9 等）
+    local tcp_others udp_others
+    tcp_others="$(ss -tlnp 2>/dev/null | grep -E ':53([^0-9]|$)' | grep -Ev 'unbound' || true)"
+    udp_others="$(ss -ulnp 2>/dev/null | grep -E ':53([^0-9]|$)' | grep -Ev 'unbound' || true)"
+    [[ -n "$tcp_others" ]] || [[ -n "$udp_others" ]]
 }
 
 ###############################################################################
