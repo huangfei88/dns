@@ -5,7 +5,8 @@
 #
 # 功能特性:
 #   - DNSSEC 验证及自动根信任锚管理
-#   - 针对低延迟公共 DNS 的高性能调优（仅端口 53 UDP/TCP）
+#   - 针对低延迟公共 DNS 的高性能调优（端口 53 UDP/TCP）
+#   - Unbound 原生 DoT (DNS-over-TLS, 端口 853) 和 DoH (DNS-over-HTTPS, 端口 443) 支持
 #   - DNS 专用速率限制、访问控制和防放大攻击
 #   - Systemd 服务沙箱隔离
 #   - UFW 防火墙 DNS 规则（增量添加，不重置已有规则）
@@ -15,11 +16,9 @@
 #       核心转储限制、禁用不必要服务、系统审计规则等）假定已由系统管理员
 #       统一管理。本脚本仅负责 Unbound DNS 相关组件的安装和配置。
 #
-# 注意: DoT (DNS-over-TLS, 端口 853) 由本脚本放通防火墙端口，
-#       DoH (DNS-over-HTTPS, 端口 443) 由单独安装的 NGINX 反向代理放通。
-#       SSL 证书在安装 NGINX 时申请。
-#       本脚本配置 Unbound 作为纯 DNS 递归解析服务器（端口 53），
-#       并预先放通 DoT 端口 853 供后续 NGINX 配置使用。
+# 注意: DoT (端口 853) 和 DoH (端口 443) 由 Unbound 原生支持（需要
+#       libnghttp2 编译支持）。安装时自动生成自签名 TLS 证书用于初始使用，
+#       生产环境建议替换为 Let's Encrypt 等 CA 签发的正式证书。
 #
 # 用法:
 #   sudo bash install_unbound.sh [install|uninstall|update] [--dry-run]
@@ -35,7 +34,7 @@ umask 0027
 ###############################################################################
 # 常量和默认值
 ###############################################################################
-readonly SCRIPT_VERSION="1.9.0"
+readonly SCRIPT_VERSION="2.0.0"
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/unbound-install.log"
@@ -47,8 +46,15 @@ readonly UNBOUND_CONF_DIR="/etc/unbound/unbound.conf.d"
 readonly UNBOUND_MAIN_CONF="/etc/unbound/unbound.conf"
 readonly UNBOUND_LOG_DIR="/var/log/unbound"
 
-# 网络端口默认值（DNS 端口 53 + DoT 端口 853，DoH 端口 443 由 NGINX 处理）
+# 网络端口默认值（DNS 端口 53 + DoT 端口 853 + DoH 端口 443）
 readonly DNS_PORT=53
+readonly DOT_PORT=853
+readonly DOH_PORT=443
+
+# TLS 证书路径（DoT/DoH 所需，默认使用 Unbound 自签名证书）
+readonly TLS_CERT_DIR="/etc/unbound/tls"
+readonly TLS_CERT_FILE="${TLS_CERT_DIR}/server.pem"
+readonly TLS_KEY_FILE="${TLS_CERT_DIR}/server.key"
 
 # 信号退出码常量
 readonly EXIT_SIGINT=130
@@ -173,9 +179,9 @@ usage() {
   -v, --version         显示脚本版本
 
 注意:
-  DoT (DNS-over-TLS, 端口 853) 防火墙端口由本脚本放通。
-  DoH (DNS-over-HTTPS, 端口 443) 由单独安装的 NGINX 放通。
-  SSL 证书在安装 NGINX 时申请。本脚本配置 Unbound 纯 DNS 递归解析。
+  DoT (DNS-over-TLS, 端口 853) 和 DoH (DNS-over-HTTPS, 端口 443) 由
+  Unbound 原生提供（需要 libnghttp2 编译支持）。安装时自动生成自签名
+  TLS 证书，生产环境建议替换为正式 CA 证书。
 
 示例:
   sudo $SCRIPT_NAME                 # 默认执行安装
@@ -558,6 +564,58 @@ setup_dnssec() {
 }
 
 ###############################################################################
+# 生成 DoT/DoH 所需的 TLS 证书
+# 默认生成自签名证书用于初始使用，生产环境应替换为 CA 签发的正式证书。
+###############################################################################
+setup_tls_certificates() {
+    info "正在配置 DoT/DoH TLS 证书..."
+
+    # 创建 TLS 证书目录
+    mkdir -p "$TLS_CERT_DIR"
+    chown root:unbound "$TLS_CERT_DIR"
+    chmod 0750 "$TLS_CERT_DIR"
+
+    # 如果已存在有效证书则跳过生成
+    if [[ -f "$TLS_CERT_FILE" ]] && [[ -f "$TLS_KEY_FILE" ]]; then
+        # 验证证书是否尚未过期
+        if openssl x509 -checkend 86400 -noout -in "$TLS_CERT_FILE" >/dev/null 2>&1; then
+            info "TLS 证书已存在且有效，跳过生成。"
+            # 确保权限正确
+            chown root:unbound "$TLS_KEY_FILE" "$TLS_CERT_FILE"
+            chmod 0640 "$TLS_KEY_FILE"
+            chmod 0644 "$TLS_CERT_FILE"
+            return 0
+        else
+            warn "TLS 证书已过期，将重新生成。"
+        fi
+    fi
+
+    # 生成自签名 TLS 证书（用于初始使用 / 测试）
+    # 生产环境建议替换为 Let's Encrypt 等 CA 签发的正式证书
+    info "正在生成自签名 TLS 证书（有效期 3650 天）..."
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$TLS_KEY_FILE" \
+        -out "$TLS_CERT_FILE" \
+        -days 3650 -nodes \
+        -subj "/CN=dns.local/O=Unbound DNS" \
+        2>/dev/null
+
+    if [[ ! -f "$TLS_CERT_FILE" ]] || [[ ! -f "$TLS_KEY_FILE" ]]; then
+        fatal "TLS 证书生成失败。DoT/DoH 需要有效的 TLS 证书。"
+    fi
+
+    # 设置严格权限（私钥仅 root 和 unbound 可读）
+    chown root:unbound "$TLS_KEY_FILE" "$TLS_CERT_FILE"
+    chmod 0640 "$TLS_KEY_FILE"
+    chmod 0644 "$TLS_CERT_FILE"
+
+    info "TLS 自签名证书已生成。"
+    warn "当前使用自签名证书，生产环境请替换为 CA 签发的正式证书。"
+    warn "证书路径: $TLS_CERT_FILE"
+    warn "密钥路径: $TLS_KEY_FILE"
+}
+
+###############################################################################
 # 生成 Unbound 配置文件
 ###############################################################################
 configure_unbound() {
@@ -595,12 +653,36 @@ EOF
 # =============================================================================
 # 服务器核心配置
 # 针对 Azure Standard_B2ats_v2 (2 vCPU, 1 GiB 内存) 优化
-# Unbound 仅提供端口 53 DNS 服务，DoT(853)/DoH(443) 由 NGINX 反向代理处理
+# 提供 DNS(53) + DoT(${DOT_PORT}) + DoH(${DOH_PORT}) 服务
 # =============================================================================
 server:
-    # --- 接口绑定（仅 DNS 端口 53）---
+    # --- 接口绑定 ---
+    # DNS 端口 53 (UDP/TCP)
     interface: 0.0.0.0@${DNS_PORT}
     interface: ::0@${DNS_PORT}
+
+    # DoT 端口 ${DOT_PORT} (DNS-over-TLS)
+    interface: 0.0.0.0@${DOT_PORT}
+    interface: ::0@${DOT_PORT}
+
+    # DoH 端口 ${DOH_PORT} (DNS-over-HTTPS, 需要 libnghttp2)
+    interface: 0.0.0.0@${DOH_PORT}
+    interface: ::0@${DOH_PORT}
+
+    # --- TLS 设置（DoT/DoH 所需）---
+    tls-service-key: "${TLS_KEY_FILE}"
+    tls-service-pem: "${TLS_CERT_FILE}"
+    # TLS 加密套件（仅允许 TLS 1.2+，符合 PCI-DSS 要求）
+    tls-ciphers: "PROFILE=SYSTEM"
+    tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+
+    # DoT 端口声明
+    tls-port: ${DOT_PORT}
+
+    # DoH 端口声明和端点路径
+    https-port: ${DOH_PORT}
+    http-endpoint: "/dns-query"
+    http-notls-downstream: no
 
     # --- 访问控制（公共 DNS）---
     access-control: 0.0.0.0/0 allow
@@ -1020,11 +1102,12 @@ configure_firewall() {
     ufw allow 53/udp >/dev/null 2>&1
 
     # DoT (DNS-over-TLS, TCP 端口 853)
-    # NGINX 使用此端口终止 TLS 并代理到 Unbound，此处预先放通
+    # Unbound 原生提供 DoT 服务
     ufw allow 853/tcp >/dev/null 2>&1
 
-    # 注意: DoH (端口 443) 由单独安装的 NGINX 反向代理处理。
-    # NGINX 安装脚本应自行开放 443 端口。
+    # DoH (DNS-over-HTTPS, TCP 端口 443)
+    # Unbound 原生提供 DoH 服务（需要 libnghttp2 编译支持）
+    ufw allow 443/tcp >/dev/null 2>&1
 
     # 启用日志记录（中等级别用于审计）
     ufw logging medium >/dev/null 2>&1
@@ -1033,8 +1116,8 @@ configure_firewall() {
     ufw --force enable >/dev/null 2>&1
 
     info "UFW 防火墙已配置（DNS 规则已添加）。"
-    info "已开放端口: DNS(53/tcp+udp), DoT(853/tcp)"
-    info "注意: SSH 端口由系统管理员单独管理。DoH(443) 端口将由 NGINX 安装脚本开放。"
+    info "已开放端口: DNS(53/tcp+udp), DoT(853/tcp), DoH(443/tcp)"
+    info "注意: SSH 端口由系统管理员单独管理。"
 }
 
 ###############################################################################
@@ -1297,6 +1380,14 @@ fi
 # 检查 6: unbound-control 是否正常
 unbound-control status >/dev/null 2>&1
 check "unbound-control 运行状态" "$?"
+
+# 检查 7: DoT 端口 853 是否监听
+ss -tlnp | grep -qE ':853([^0-9]|$)' 2>/dev/null
+check "DoT 端口 853 (TCP) 监听状态" "$?"
+
+# 检查 8: DoH 端口 443 是否监听
+ss -tlnp | grep -qE ':443([^0-9]|$)' 2>/dev/null
+check "DoH 端口 443 (TCP) 监听状态" "$?"
 
 # 汇总报告
 echo ""
@@ -1651,6 +1742,24 @@ post_install_validation() {
         fail=$((fail + 1))
     fi
 
+    # 测试 4b: DoT 端口 853 监听状态
+    if ss -tlnp | grep -qE ":${DOT_PORT}([^0-9]|$)"; then
+        printf '%b[通过]%b DoT 端口 %s 正在监听\n' "${GREEN}" "${NC}" "${DOT_PORT}"
+        pass=$((pass + 1))
+    else
+        printf '%b[失败]%b DoT 端口 %s 未监听\n' "${RED}" "${NC}" "${DOT_PORT}"
+        fail=$((fail + 1))
+    fi
+
+    # 测试 4c: DoH 端口 443 监听状态
+    if ss -tlnp | grep -qE ":${DOH_PORT}([^0-9]|$)"; then
+        printf '%b[通过]%b DoH 端口 %s 正在监听\n' "${GREEN}" "${NC}" "${DOH_PORT}"
+        pass=$((pass + 1))
+    else
+        printf '%b[失败]%b DoH 端口 %s 未监听\n' "${RED}" "${NC}" "${DOH_PORT}"
+        fail=$((fail + 1))
+    fi
+
     # 测试 5: 配置文件验证
     if unbound-checkconf "$UNBOUND_MAIN_CONF" >/dev/null 2>&1; then
         printf '%b[通过]%b 配置文件有效\n' "${GREEN}" "${NC}"
@@ -1717,15 +1826,20 @@ print_summary() {
 ║                                                                            ║
 ║  监听端口:                                                                  ║
 ║    • DNS (UDP/TCP):  ${DNS_PORT}                                                    ║
+║    • DoT (TLS):      ${DOT_PORT}                                                  ║
+║    • DoH (HTTPS):    ${DOH_PORT}                                                  ║
 ║    • 远程控制:       8953 (仅限本地)                                         ║
 ║                                                                            ║
 ║  防火墙已开放端口（本脚本管理）:                                               ║
 ║    • DNS:  53/tcp + 53/udp                                                  ║
 ║    • DoT:  853/tcp                                                          ║
+║    • DoH:  443/tcp                                                          ║
 ║    （SSH 端口由系统管理员单独管理）                                             ║
 ║                                                                            ║
-║  注意: DoH (端口 443) 由 NGINX 反向代理提供                                  ║
-║        请单独安装 NGINX 并由其安装脚本开放 443 端口                            ║
+║  TLS 证书（DoT/DoH）:                                                       ║
+║    • 证书: ${TLS_CERT_FILE}                          ║
+║    • 密钥: ${TLS_KEY_FILE}                           ║
+║    • 注意: 当前使用自签名证书，生产环境请替换为 CA 签发的正式证书               ║
 ║                                                                            ║
 ║  配置文件:                                                                  ║
 ║    • 主配置:        ${UNBOUND_MAIN_CONF}                           ║
@@ -1741,8 +1855,13 @@ print_summary() {
 ║    • 重载配置:      unbound-control reload                                 ║
 ║    • 检查配置:      unbound-checkconf                                      ║
 ║                                                                            ║
+║  DoH 测试命令:                                                              ║
+║    curl -kv https://127.0.0.1/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE ║
+║                                                                            ║
 ║  安全特性:                                                                  ║
 ║    ✓ DNSSEC 验证已启用（含 val-max-restart 防护）                            ║
+║    ✓ DoT (DNS-over-TLS) 原生支持                                            ║
+║    ✓ DoH (DNS-over-HTTPS) 原生支持                                          ║
 ║    ✓ 速率限制（每 IP 和全局）                                                ║
 ║    ✓ UFW 防火墙 DNS 规则（保留已有规则，不重置）                              ║
 ║    ✓ Fail2Ban DNS 滥用防护                                                  ║
@@ -1782,7 +1901,7 @@ uninstall_unbound() {
         info "  1.  停止并禁用 Unbound 服务"
         info "  2.  停止并禁用相关定时器（根提示/信任锚更新）"
         info "  3.  移除 Fail2Ban DNS 防护规则"
-        info "  4.  移除 UFW 防火墙中的 DNS 和 DoT 规则（保留其他规则）"
+        info "  4.  移除 UFW 防火墙中的 DNS、DoT 和 DoH 规则（保留其他规则）"
         info "  5.  移除 Unbound 相关的 sysctl 调优"
         info "  6.  移除 Unbound 日志轮转配置"
         info "  7.  移除 Unbound DNS 专用 auditd 审计规则"
@@ -1839,13 +1958,13 @@ uninstall_unbound() {
     fi
     info "  Fail2Ban DNS 规则已移除。"
 
-    info "步骤 4: 移除 UFW 防火墙中的 DNS 和 DoT 规则..."
+    info "步骤 4: 移除 UFW 防火墙中的 DNS、DoT 和 DoH 规则..."
     ufw delete allow 53/tcp 2>/dev/null || true
     ufw delete allow 53/udp 2>/dev/null || true
     ufw delete allow 853/tcp 2>/dev/null || true
-    # 注意: 仅移除 DNS 和 DoT 规则，其他规则（包括 SSH）保持不变
-    # DoH(443) 由 NGINX 脚本管理，此处不移除
-    info "  DNS 和 DoT 防火墙规则已移除（其他规则保持不变）。"
+    ufw delete allow 443/tcp 2>/dev/null || true
+    # 注意: 仅移除 DNS、DoT 和 DoH 规则，其他规则（包括 SSH）保持不变
+    info "  DNS、DoT 和 DoH 防火墙规则已移除（其他规则保持不变）。"
 
     info "步骤 5: 移除 Unbound 相关的 sysctl 调优..."
     rm -f /etc/sysctl.d/99-unbound-dns.conf
@@ -2089,8 +2208,7 @@ main() {
     info "║   目标: Debian 13 / Azure Standard_B2ats_v2                 ║"
     info "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    info "Unbound 仅提供 DNS 端口 53 服务（DoT 端口 853 已预先放通）"
-    info "DoH (端口 443) 将由单独安装的 NGINX 反向代理提供"
+    info "Unbound 提供 DNS(53) + DoT(${DOT_PORT}) + DoH(${DOH_PORT}) 服务"
     echo ""
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -2102,21 +2220,21 @@ main() {
         info "  4.  应用 DNS 性能调优"
         info "  5.  创建 Unbound 用户和目录结构"
         info "  6.  配置 DNSSEC 信任锚和根提示文件"
-        info "  7.  生成 Unbound 主配置文件（仅 DNS 端口 53，清理旧配置）"
-        info "  8.  配置域名黑名单/RPZ"
-        info "  9.  配置 UFW 防火墙 DNS 规则（保留已有规则）"
-        info "  10. 配置 Fail2Ban DNS 滥用防护"
-        info "  11. 配置日志轮转（365 天保留，PCI-DSS v4.0 合规）"
-        info "  12. 配置 Unbound DNS 专用 auditd 审计规则"
-        info "  13. 应用 Systemd 服务安全加固"
-        info "  14. 创建监控和健康检查脚本及 systemd 定时器"
-        info "  15. 验证配置文件语法"
-        info "  16. 启动 Unbound 服务"
-        info "  17. 运行安装后验证测试"
+        info "  7.  生成 DoT/DoH TLS 证书（自签名，生产环境请替换）"
+        info "  8.  生成 Unbound 主配置文件（DNS 53 + DoT ${DOT_PORT} + DoH ${DOH_PORT}）"
+        info "  9.  配置域名黑名单/RPZ"
+        info "  10. 配置 UFW 防火墙 DNS/DoT/DoH 规则（保留已有规则）"
+        info "  11. 配置 Fail2Ban DNS 滥用防护"
+        info "  12. 配置日志轮转（365 天保留，PCI-DSS v4.0 合规）"
+        info "  13. 配置 Unbound DNS 专用 auditd 审计规则"
+        info "  14. 应用 Systemd 服务安全加固"
+        info "  15. 创建监控和健康检查脚本及 systemd 定时器"
+        info "  16. 验证配置文件语法"
+        info "  17. 启动 Unbound 服务"
+        info "  18. 运行安装后验证测试"
         info ""
         info "注意: CIS/PCI-DSS 系统级加固（SSH、登录横幅、核心转储、禁用服务等）"
         info "      假定已由系统管理员统一管理，本脚本仅配置 DNS 相关组件。"
-        info "      DoH (端口 443) 由单独安装的 NGINX 反向代理提供，不在本脚本范围内。"
         exit 0
     fi
 
@@ -2132,6 +2250,7 @@ main() {
     tune_system_for_dns
     setup_unbound_dirs
     setup_dnssec
+    setup_tls_certificates
     configure_unbound
     configure_rpz
     configure_firewall
