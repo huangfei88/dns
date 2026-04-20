@@ -1035,11 +1035,15 @@ configure_firewall() {
 
     # 安全检查: 在启用 UFW 前确认 SSH 规则存在，防止远程服务器被锁定
     if ! ufw status 2>/dev/null | grep -q "Status: active"; then
-        # UFW 尚未启用，检查是否已有 SSH 放行规则
-        if ! ufw status verbose 2>/dev/null | grep -qE '22/(tcp|udp)|OpenSSH'; then
+        # UFW 尚未启用，检查已添加的规则中是否包含 SSH 放行规则
+        if ! ufw show added 2>/dev/null | grep -qE '22/(tcp|udp)|OpenSSH'; then
             warn "未检测到 SSH 防火墙规则！启用 UFW 可能导致远程 SSH 连接断开。"
             warn "正在自动添加 SSH 规则以防止锁定: ufw allow 22/tcp"
-            ufw allow 22/tcp >/dev/null 2>&1
+            if ! ufw allow 22/tcp >/dev/null 2>&1; then
+                warn "SSH 规则添加失败！跳过 UFW 启用以防止 SSH 锁定。"
+                warn "请手动运行: ufw allow 22/tcp && ufw enable"
+                return 0
+            fi
         fi
     fi
 
