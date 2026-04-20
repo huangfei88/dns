@@ -700,7 +700,7 @@ server:
     # TLS 加密套件（仅允许 TLS 1.2+ 完美前向保密，符合 PCI-DSS 要求）
     # 注意: Debian 13 Unbound 链接 OpenSSL，此处使用 OpenSSL 密码套件字符串格式
     # ECDHE/DHE 密钥交换 + AESGCM/CHACHA20 对称加密，排除弱算法
-    tls-ciphers: "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20"
+    tls-ciphers: "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!eNULL:!MD5:!RC4"
     # TLS 1.3 密码套件（格式对 OpenSSL 和 GnuTLS 通用）
     tls-ciphersuites: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
 
@@ -1643,7 +1643,7 @@ is_port53_in_use() {
 is_tcp_port_in_use() {
     local port="$1"
     local tcp_others
-    tcp_others="$(ss -tlnp 2>/dev/null | grep -E ":${port}([^0-9]|$)" | grep -Ev 'unbound' || true)"
+    tcp_others="$(ss -tlnp 2>/dev/null | grep -E ":${port}([^0-9]|\$)" | grep -Ev 'unbound' || true)"
     [[ -n "$tcp_others" ]]
 }
 
