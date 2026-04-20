@@ -17,7 +17,7 @@
 #       本脚本仅配置 Unbound 作为纯 DNS 递归解析服务器（端口 53）。
 #
 # 用法:
-#   sudo bash install_unbound.sh
+#   sudo bash install_unbound.sh [install|uninstall|update] [--dry-run]
 #
 # Azure Standard_B2ats_v2: 2 vCPU (Arm64), 1 GiB 内存
 # 针对 2 线程、保守缓存大小和积极预取进行优化。
@@ -84,6 +84,42 @@ readonly NC='\033[0m'
 # 全局变量（通过命令行参数设置）
 ###############################################################################
 DRY_RUN="false"
+ACTION="install"    # 默认动作: install | uninstall | update
+
+###############################################################################
+# SSH 端口自动检测
+# 从 sshd 配置文件中读取实际监听端口，避免硬编码 22。
+# 优先检查 sshd_config.d/ 下的配置片段（Debian 13 默认），再检查主配置文件。
+# 如果无法确定，回退到默认端口 22。
+###############################################################################
+detect_ssh_port() {
+    local ssh_port=""
+
+    # 方法 1: 从 sshd_config.d/*.conf 中查找（Debian 13 推荐方式）
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        ssh_port="$(grep -rhiE '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
+                    | tail -1 | awk '{print $2}' | tr -d '[:space:]')"
+    fi
+
+    # 方法 2: 从主配置文件 sshd_config 中查找
+    if [[ -z "$ssh_port" ]] && [[ -f /etc/ssh/sshd_config ]]; then
+        ssh_port="$(grep -iE '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null \
+                    | tail -1 | awk '{print $2}' | tr -d '[:space:]')"
+    fi
+
+    # 方法 3: 检测当前 sshd 实际监听的端口
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="$(ss -tlnp 2>/dev/null | grep -E 'sshd' \
+                    | awk '{print $4}' | grep -oE '[0-9]+$' | head -1)"
+    fi
+
+    # 回退: 默认端口 22
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="22"
+    fi
+
+    echo "$ssh_port"
+}
 
 ###############################################################################
 # 日志辅助函数
@@ -154,7 +190,12 @@ DNSEOF
 ###############################################################################
 usage() {
     cat <<EOF
-用法: sudo $SCRIPT_NAME [选项]
+用法: sudo $SCRIPT_NAME [命令] [选项]
+
+命令:
+  install               安装并配置 Unbound DNS 服务器（默认）
+  uninstall             卸载 Unbound DNS 服务器并清理所有配置
+  update                更新 Unbound 软件包、根提示文件和信任锚
 
 可选参数:
   --dry-run             仅显示将要执行的操作，不做任何更改
@@ -166,8 +207,11 @@ usage() {
   SSL 证书在安装 NGINX 时申请。本脚本仅配置 Unbound 纯 DNS 递归解析。
 
 示例:
-  sudo $SCRIPT_NAME
-  sudo $SCRIPT_NAME --dry-run
+  sudo $SCRIPT_NAME                 # 默认执行安装
+  sudo $SCRIPT_NAME install         # 安装 Unbound
+  sudo $SCRIPT_NAME uninstall       # 卸载 Unbound
+  sudo $SCRIPT_NAME update          # 更新 Unbound
+  sudo $SCRIPT_NAME install --dry-run
 EOF
     exit 0
 }
@@ -178,6 +222,18 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            install)
+                ACTION="install"
+                shift
+                ;;
+            uninstall)
+                ACTION="uninstall"
+                shift
+                ;;
+            update)
+                ACTION="update"
+                shift
+                ;;
             --dry-run)
                 DRY_RUN="true"
                 shift
@@ -1079,6 +1135,11 @@ EOF
 configure_firewall() {
     info "正在配置 UFW 防火墙..."
 
+    # 自动检测当前 SSH 端口
+    local ssh_port
+    ssh_port="$(detect_ssh_port)"
+    info "检测到 SSH 端口: ${ssh_port}"
+
     # 重置 UFW 到干净状态（非交互式）
     ufw --force reset >/dev/null 2>&1
 
@@ -1087,7 +1148,7 @@ configure_firewall() {
     ufw default allow outgoing >/dev/null 2>&1
 
     # SSH 速率限制（每个 IP 每 30 秒限制 6 次连接）
-    ufw limit ssh/tcp >/dev/null 2>&1
+    ufw limit "${ssh_port}/tcp" >/dev/null 2>&1
 
     # DNS (UDP 和 TCP 端口 53)
     ufw allow 53/tcp >/dev/null 2>&1
@@ -1103,7 +1164,7 @@ configure_firewall() {
     ufw --force enable >/dev/null 2>&1
 
     info "UFW 防火墙已配置并激活。"
-    info "已开放端口: SSH(22/tcp-限速), DNS(53/tcp+udp)"
+    info "已开放端口: SSH(${ssh_port}/tcp-限速), DNS(53/tcp+udp)"
     info "注意: DoT(853) 和 DoH(443) 端口将由 NGINX 安装脚本开放。"
 }
 
@@ -1906,6 +1967,8 @@ post_install_validation() {
 # 打印安装摘要
 ###############################################################################
 print_summary() {
+    local ssh_port
+    ssh_port="$(detect_ssh_port)"
     cat <<EOF
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1922,7 +1985,7 @@ print_summary() {
 ║    • 远程控制:       8953 (仅限本地)                                         ║
 ║                                                                            ║
 ║  防火墙已开放端口:                                                           ║
-║    • SSH:  22/tcp (速率限制)                                                 ║
+║    • SSH:  $(printf '%-10s' "${ssh_port}/tcp") (速率限制)                                          ║
 ║    • DNS:  53/tcp + 53/udp                                                  ║
 ║                                                                            ║
 ║  注意: DOT (端口 853) 和 DoH (端口 443) 由 NGINX 反向代理提供               ║
@@ -2042,6 +2105,286 @@ EOF
 }
 
 ###############################################################################
+# 卸载 Unbound
+###############################################################################
+uninstall_unbound() {
+    info "╔══════════════════════════════════════════════════════════════╗"
+    info "║            Unbound DNS 服务器卸载程序                        ║"
+    info "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "试运行模式 - 不会做任何更改。"
+        info "将要执行以下卸载步骤:"
+        info "  1.  停止并禁用 Unbound 服务"
+        info "  2.  停止并禁用相关定时器（根提示/信任锚更新）"
+        info "  3.  移除 Fail2Ban DNS 防护规则"
+        info "  4.  移除 UFW 防火墙中的 DNS 规则（保留 SSH 规则）"
+        info "  5.  移除 Unbound 相关的 sysctl 调优"
+        info "  6.  移除 Unbound 日志轮转配置"
+        info "  7.  移除 Unbound auditd 审计规则"
+        info "  8.  移除 systemd 服务加固配置和 tmpfiles 配置"
+        info "  9.  移除监控和健康检查脚本"
+        info "  10. 卸载 Unbound 软件包"
+        info "  11. 清理配置文件和日志目录"
+        info "  12. 恢复 resolv.conf 至公共 DNS"
+        exit 0
+    fi
+
+    # 必须以 root 权限运行
+    if [[ $EUID -ne 0 ]]; then
+        fatal "此脚本必须以 root 权限运行 (sudo)。"
+    fi
+
+    # 初始化日志文件
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
+    chmod 640 "$LOG_FILE"
+
+    info "步骤 1: 停止并禁用 Unbound 服务..."
+    if systemctl is-active --quiet unbound 2>/dev/null; then
+        systemctl stop unbound 2>/dev/null || true
+        info "  Unbound 服务已停止。"
+    fi
+    systemctl disable unbound 2>/dev/null || true
+
+    info "步骤 2: 停止并禁用相关定时器..."
+    local timer_units=(
+        update-root-hints.timer
+        update-root-hints.service
+        update-trust-anchor.timer
+        update-trust-anchor.service
+        unbound-health-check.timer
+        unbound-health-check.service
+    )
+    for unit in "${timer_units[@]}"; do
+        if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+            systemctl disable --now "$unit" 2>/dev/null || true
+            info "  已禁用: $unit"
+        fi
+    done
+    # 移除 systemd 单元文件
+    rm -f /etc/systemd/system/update-root-hints.timer
+    rm -f /etc/systemd/system/update-root-hints.service
+    rm -f /etc/systemd/system/update-trust-anchor.timer
+    rm -f /etc/systemd/system/update-trust-anchor.service
+    rm -f /etc/systemd/system/unbound-health-check.timer
+    rm -f /etc/systemd/system/unbound-health-check.service
+
+    info "步骤 3: 移除 Fail2Ban DNS 防护规则..."
+    rm -f /etc/fail2ban/jail.d/unbound-dns.conf
+    rm -f /etc/fail2ban/filter.d/unbound-dns-abuse.conf
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        systemctl restart fail2ban 2>/dev/null || true
+    fi
+    info "  Fail2Ban DNS 规则已移除。"
+
+    info "步骤 4: 移除 UFW 防火墙中的 DNS 规则..."
+    ufw delete allow 53/tcp 2>/dev/null || true
+    ufw delete allow 53/udp 2>/dev/null || true
+    # 注意: 仅移除 DNS 规则，SSH 规则保持不变以确保远程管理不受影响
+    info "  DNS 防火墙规则已移除（SSH 规则保持不变）。"
+
+    info "步骤 5: 移除 Unbound 相关的 sysctl 调优..."
+    rm -f /etc/sysctl.d/99-unbound-dns.conf
+    sysctl --system >/dev/null 2>&1 || true
+    info "  sysctl 调优已移除。"
+
+    info "步骤 6: 移除 Unbound 日志轮转配置..."
+    rm -f /etc/logrotate.d/unbound
+    info "  日志轮转配置已移除。"
+
+    info "步骤 7: 移除 Unbound auditd 审计规则..."
+    rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
+    if systemctl is-active --quiet auditd 2>/dev/null; then
+        augenrules --load 2>/dev/null || true
+    fi
+    info "  auditd 审计规则已移除。"
+
+    info "步骤 8: 移除 systemd 服务加固配置..."
+    rm -rf /etc/systemd/system/unbound.service.d
+    rm -f /etc/tmpfiles.d/unbound.conf
+    systemctl daemon-reload
+    info "  systemd 配置已清理。"
+
+    info "步骤 9: 移除监控和健康检查脚本..."
+    rm -f /usr/local/bin/unbound-health-check
+    rm -f /usr/local/bin/unbound-stats
+    rm -f /usr/local/bin/update-root-hints
+    rm -f /usr/local/bin/update-trust-anchor
+    info "  监控脚本已移除。"
+
+    info "步骤 10: 卸载 Unbound 软件包..."
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    apt-get remove --purge -y -qq unbound unbound-anchor unbound-host 2>/dev/null || true
+    apt-get autoremove -y -qq 2>/dev/null || true
+    apt-get clean
+    info "  Unbound 软件包已卸载。"
+
+    info "步骤 11: 清理配置文件和日志目录..."
+    rm -rf /etc/unbound
+    rm -rf "$UNBOUND_LOG_DIR"
+    rm -rf /var/lib/unbound
+    rm -rf /run/unbound
+    info "  配置和日志目录已清理。"
+
+    info "步骤 12: 恢复 resolv.conf..."
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+DNSEOF
+    info "  resolv.conf 已恢复为公共 DNS。"
+
+    echo ""
+    info "╔══════════════════════════════════════════════════════════════╗"
+    info "║            Unbound DNS 服务器卸载完成                        ║"
+    info "╠══════════════════════════════════════════════════════════════╣"
+    info "║  • Unbound 服务已停止并卸载                                  ║"
+    info "║  • 所有相关配置文件已清理                                     ║"
+    info "║  • DNS 已恢复为公共 DNS (1.1.1.1 / 8.8.8.8)                ║"
+    info "║  • 防火墙 DNS 规则已移除                                     ║"
+    info "║  • 备份文件保留在: /var/backups/unbound-install-*           ║"
+    info "║  • 安装日志保留在: ${LOG_FILE}                   ║"
+    info "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+}
+
+###############################################################################
+# 更新 Unbound
+###############################################################################
+update_unbound() {
+    info "╔══════════════════════════════════════════════════════════════╗"
+    info "║            Unbound DNS 服务器更新程序                        ║"
+    info "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "试运行模式 - 不会做任何更改。"
+        info "将要执行以下更新步骤:"
+        info "  1.  检查 Unbound 是否已安装"
+        info "  2.  备份当前配置"
+        info "  3.  更新系统软件包列表"
+        info "  4.  升级 Unbound 及相关软件包"
+        info "  5.  更新根提示文件 (root.hints)"
+        info "  6.  更新 DNSSEC 信任锚 (root.key)"
+        info "  7.  验证配置文件"
+        info "  8.  重启 Unbound 服务"
+        info "  9.  运行安装后验证"
+        exit 0
+    fi
+
+    # 必须以 root 权限运行
+    if [[ $EUID -ne 0 ]]; then
+        fatal "此脚本必须以 root 权限运行 (sudo)。"
+    fi
+
+    # 初始化日志文件
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
+    chmod 640 "$LOG_FILE"
+
+    info "步骤 1: 检查 Unbound 是否已安装..."
+    if ! command -v unbound &>/dev/null; then
+        fatal "Unbound 未安装。请先运行 'sudo $SCRIPT_NAME install' 进行安装。"
+    fi
+    local current_version
+    current_version="$(unbound -V 2>&1 | head -1 || echo '未知')"
+    info "  当前版本: $current_version"
+
+    info "步骤 2: 备份当前配置..."
+    backup_existing
+
+    info "步骤 3: 更新系统软件包列表..."
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    apt-get update -qq
+
+    info "步骤 4: 升级 Unbound 及相关软件包..."
+    local packages=(unbound unbound-anchor unbound-host dns-root-data)
+    apt-get install -y -qq --only-upgrade -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" "${packages[@]}" 2>/dev/null || true
+    apt-get clean
+    local new_version
+    new_version="$(unbound -V 2>&1 | head -1 || echo '未知')"
+    info "  升级后版本: $new_version"
+
+    info "步骤 5: 更新根提示文件..."
+    local root_hints="/var/lib/unbound/root.hints"
+    local root_hints_tmp=""
+    if root_hints_tmp="$(mktemp)"; then
+        trap 'rm -f "$root_hints_tmp"' RETURN
+        if curl -sSf --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 5 -o "$root_hints_tmp" https://www.internic.net/domain/named.root && [[ -s "$root_hints_tmp" ]]; then
+            if grep -q "$ROOT_HINTS_MARKER" "$root_hints_tmp" 2>/dev/null; then
+                mv "$root_hints_tmp" "$root_hints"
+                chown unbound:unbound "$root_hints"
+                chmod 640 "$root_hints"
+                info "  根提示文件已更新。"
+            else
+                warn "  下载的根提示文件内容无效，保留现有文件。"
+                rm -f "$root_hints_tmp"
+            fi
+        else
+            warn "  无法下载根提示文件，保留现有文件。"
+            rm -f "$root_hints_tmp"
+        fi
+        trap - RETURN
+    fi
+
+    info "步骤 6: 更新 DNSSEC 信任锚..."
+    local anchor_file="/var/lib/unbound/root.key"
+    local anchor_exit=0
+    unbound-anchor -a "$anchor_file" 2>/dev/null || anchor_exit=$?
+    if [[ $anchor_exit -le 1 ]]; then
+        info "  DNSSEC 信任锚已更新 (退出码: ${anchor_exit})。"
+    else
+        warn "  unbound-anchor 执行异常 (退出码: ${anchor_exit})。"
+    fi
+    chown unbound:unbound "$anchor_file"
+    chmod 640 "$anchor_file"
+
+    info "步骤 7: 验证配置文件..."
+    if unbound-checkconf "$UNBOUND_MAIN_CONF"; then
+        info "  配置文件验证通过。"
+    else
+        fatal "配置文件验证失败。请检查 $UNBOUND_MAIN_CONF。备份位于: $BACKUP_DIR"
+    fi
+
+    info "步骤 8: 重启 Unbound 服务..."
+    systemctl restart unbound
+    local retries=10
+    while [[ $retries -gt 0 ]]; do
+        if systemctl is-active --quiet unbound; then
+            break
+        fi
+        sleep 1
+        retries=$((retries - 1))
+    done
+    if systemctl is-active --quiet unbound; then
+        info "  Unbound 已重启并正在运行。"
+    else
+        error "  Unbound 重启失败。请检查日志: journalctl -u unbound"
+        journalctl -u unbound --no-pager -n 20
+        fatal "Unbound 重启失败。"
+    fi
+
+    info "步骤 9: 运行更新后验证..."
+    post_install_validation
+
+    echo ""
+    info "╔══════════════════════════════════════════════════════════════╗"
+    info "║            Unbound DNS 服务器更新完成                        ║"
+    info "╠══════════════════════════════════════════════════════════════╣"
+    info "║  • 更新前版本: $(printf '%-40s' "$current_version")║"
+    info "║  • 更新后版本: $(printf '%-40s' "$new_version")║"
+    info "║  • 根提示文件和信任锚已更新                                  ║"
+    info "║  • 配置文件验证通过                                          ║"
+    info "║  • 备份位于: ${BACKUP_DIR}          ║"
+    info "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+}
+
+###############################################################################
 # 主函数
 ###############################################################################
 main() {
@@ -2054,6 +2397,15 @@ main() {
     trap 'cleanup_on_error $LINENO' ERR
     trap '_trap_int' INT
     trap '_trap_term' TERM
+
+    # 根据 ACTION 分派到对应的处理函数
+    if [[ "$ACTION" == "uninstall" ]]; then
+        uninstall_unbound
+        exit 0
+    elif [[ "$ACTION" == "update" ]]; then
+        update_unbound
+        exit 0
+    fi
 
     echo ""
     info "╔══════════════════════════════════════════════════════════════╗"
