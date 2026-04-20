@@ -13,7 +13,7 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - **QNAME minimisation** (RFC 7816) for upstream privacy
 - **0x20 query randomisation** to prevent spoofing
 - **Rate limiting** (per-IP and global) with automatic blocking
-- **UFW firewall** (nftables backend) with default-deny policy and rate-limited SSH
+- **UFW firewall** (nftables backend) with default-deny policy
 - **Fail2Ban** integration for DNS abuse protection
 - **Systemd sandboxing** (ProtectSystem, NoNewPrivileges, MemoryDenyWriteExecute, etc.)
 - **deny-any** to prevent amplification attacks
@@ -30,11 +30,11 @@ Enterprise-grade Unbound DNS server installation script for **Debian 13 (Trixie)
 - Conservative cache sizes for low-memory environments
 
 ### Compliance
-- **CIS Benchmark** hardening (kernel, filesystem, services, login banners, core dump restrictions)
-- **PCI-DSS** compliance (TLS 1.2+, audit logging, 365-day log retention, access control)
-- Comprehensive audit logging
-- Login banners and access restrictions
-- Disabled unnecessary services
+- **PCI-DSS** compliance (TLS 1.2+ via NGINX proxy, audit logging, 365-day log retention, access control)
+- Comprehensive audit logging (Unbound DNS-specific auditd rules)
+- DNS configuration and DNSSEC change monitoring
+
+> **Note**: CIS Benchmark system-level hardening (kernel parameters, login banners, core dump restrictions, disabling unnecessary services, etc.) is assumed to be managed separately by the system administrator. This script focuses solely on Unbound DNS components.
 
 ### Monitoring & Maintenance
 - Health check script (`/usr/local/bin/unbound-health-check`)
@@ -154,8 +154,7 @@ Examples:
 | `/etc/unbound/unbound.conf.d/03-doh.conf` | DoH backend (localhost:8443, added with NGINX) |
 | `/etc/unbound/unbound.conf.d/04-blocklist.conf` | Response policy / domain blocklist |
 | `/etc/unbound/blocklist.conf` | Custom domain blocklist entries |
-| `/etc/sysctl.d/99-unbound-dns.conf` | DNS performance + CIS kernel security tuning |
-| `/etc/security/limits.d/99-disable-coredumps.conf` | Core dump restrictions |
+| `/etc/sysctl.d/99-unbound-dns.conf` | DNS server network performance tuning |
 
 ## Management Commands
 
@@ -211,14 +210,27 @@ dig @<server-ip> dnssec-failed.org A  # Should return SERVFAIL
 
 ## Security Hardening Summary
 
-### CIS Benchmark Controls
-- [x] Kernel hardening (IP forwarding, source routing, ICMP redirects, SYN cookies)
-- [x] Core dump restrictions
-- [x] File permission hardening
-- [x] Unnecessary services disabled (avahi, cups, rpcbind, etc.)
-- [x] Login banners (pre-login and post-login)
-- [x] ASLR enabled
-- [x] BPF and ptrace restrictions
+### DNS-Specific Security (Managed by This Script)
+- [x] DNSSEC validation with automatic trust anchor management
+- [x] Rate limiting (per-IP and global) with Fail2Ban integration
+- [x] UFW firewall DNS rules (default-deny, incremental, preserves existing rules)
+- [x] Systemd sandboxing (ProtectSystem, NoNewPrivileges, MemoryDenyWriteExecute, etc.)
+- [x] Server identity and version hidden
+- [x] QNAME minimisation (RFC 7816)
+- [x] 0x20 query randomisation
+- [x] deny-any to prevent amplification attacks
+- [x] Minimal responses to reduce attack surface
+- [x] File permission hardening (config files, keys, logs)
+- [x] Unbound DNS-specific auditd rules
+- [x] 365-day log retention (PCI-DSS v4.0 Requirement 10.7.1)
+
+### System-Level Hardening (Managed Separately by System Administrator)
+- [ ] Kernel hardening (IP forwarding, source routing, ICMP redirects, SYN cookies, ASLR)
+- [ ] Core dump restrictions
+- [ ] Unnecessary services disabled (avahi, cups, rpcbind, etc.)
+- [ ] Login banners (pre-login and post-login)
+- [ ] BPF and ptrace restrictions
+- [ ] SSH hardening and access control
 
 ### PCI-DSS Requirements
 - [x] TLS 1.2+ for encrypted DNS via NGINX proxy (Requirement 4.1)
@@ -321,15 +333,16 @@ sudo ./install_unbound.sh
 
 The script will automatically:
 1. Install all required packages (Unbound, Fail2Ban, UFW, etc.)
-2. Apply kernel security hardening (CIS Benchmark + DNS performance tuning)
+2. Apply DNS server network performance tuning (sysctl)
 3. Configure DNSSEC with automatic root trust-anchor management
 4. Set up Unbound with optimized configuration for the VM size
-5. Configure UFW firewall with default-deny policy
+5. Configure UFW firewall with default-deny policy (DNS rules only, preserves existing rules)
 6. Set up Fail2Ban for DNS abuse protection
 7. Apply systemd sandboxing
 8. Create monitoring scripts and maintenance timers
-9. Validate configuration and start the service
-10. Run post-installation health checks
+9. Configure Unbound DNS-specific auditd rules
+10. Validate configuration and start the service
+11. Run post-installation health checks
 
 > **Tip**: The installation log is saved to `/var/log/unbound-install.log`. If anything goes wrong, check this file first.
 
@@ -997,8 +1010,6 @@ sudo rm -rf /etc/unbound
 sudo rm -rf /var/log/unbound
 sudo rm -rf /var/lib/unbound
 sudo rm -f /etc/sysctl.d/99-unbound-dns.conf
-sudo rm -f /etc/security/limits.d/99-disable-coredumps.conf
-sudo rm -f /etc/systemd/coredump.conf.d/99-disable-coredumps.conf
 sudo rm -f /etc/fail2ban/jail.d/unbound-dns.conf
 sudo rm -f /etc/fail2ban/filter.d/unbound-dns-abuse.conf
 sudo rm -rf /etc/systemd/system/unbound.service.d
@@ -1010,7 +1021,7 @@ sudo rm -f /usr/local/bin/unbound-stats
 sudo rm -f /usr/local/bin/update-root-hints
 sudo rm -f /usr/local/bin/update-trust-anchor
 sudo rm -f /etc/logrotate.d/unbound
-sudo rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
+sudo rm -f /etc/audit/rules.d/50-unbound.rules
 
 # Reload systemd
 sudo systemctl daemon-reload
