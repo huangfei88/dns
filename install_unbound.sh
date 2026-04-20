@@ -124,7 +124,11 @@ cleanup_on_error() {
     # 立即禁用所有陷阱，防止清理函数内部命令失败导致递归调用
     trap - ERR INT TERM
     local line_no="${1:-unknown}"
-    error "安装在第 ${line_no} 行失败 (退出码: ${exit_code})。"
+    if [[ -n "$_CAUGHT_SIGNAL" ]]; then
+        error "安装被信号 ${_CAUGHT_SIGNAL} 中断于第 ${line_no} 行。"
+    else
+        error "安装在第 ${line_no} 行失败 (退出码: ${exit_code})。"
+    fi
     error "备份文件位于: ${BACKUP_DIR:-/var/backups}"
     error "安装日志: ${LOG_FILE}"
 
@@ -1029,6 +1033,16 @@ configure_firewall() {
     # 启用日志记录（中等级别用于审计）
     ufw logging medium >/dev/null 2>&1
 
+    # 安全检查: 在启用 UFW 前确认 SSH 规则存在，防止远程服务器被锁定
+    if ! ufw status 2>/dev/null | grep -q "Status: active"; then
+        # UFW 尚未启用，检查是否已有 SSH 放行规则
+        if ! ufw status verbose 2>/dev/null | grep -qE '22/(tcp|udp)|OpenSSH'; then
+            warn "未检测到 SSH 防火墙规则！启用 UFW 可能导致远程 SSH 连接断开。"
+            warn "正在自动添加 SSH 规则以防止锁定: ufw allow 22/tcp"
+            ufw allow 22/tcp >/dev/null 2>&1
+        fi
+    fi
+
     # 启用 UFW（幂等操作，若已启用则不受影响）
     ufw --force enable >/dev/null 2>&1
 
@@ -1396,7 +1410,8 @@ ProtectHome=yes
 ReadWritePaths=/var/lib/unbound
 PrivateTmp=yes
 # AF_UNIX 需要用于 systemctl reload unbound（通过 D-Bus 与 systemd 通信）
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK 需要用于 glibc getaddrinfo()（某些 NSS 配置下 curl DNS 解析依赖此协议族）
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE
@@ -1464,7 +1479,8 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/unbound
 PrivateTmp=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK 需要用于 glibc getaddrinfo()（某些 NSS 配置下 curl DNS 解析依赖此协议族）
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE
