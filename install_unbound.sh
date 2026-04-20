@@ -1014,19 +1014,14 @@ configure_firewall() {
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
 
-    # DNS (UDP 和 TCP 端口 53) — 仅在规则不存在时添加
-    if ! ufw status | grep -qE '53/tcp\s+ALLOW'; then
-        ufw allow 53/tcp >/dev/null 2>&1
-    fi
-    if ! ufw status | grep -qE '53/udp\s+ALLOW'; then
-        ufw allow 53/udp >/dev/null 2>&1
-    fi
+    # DNS (UDP 和 TCP 端口 53)
+    # UFW 的 allow 命令天然幂等：若规则已存在，UFW 会跳过并返回 0
+    ufw allow 53/tcp >/dev/null 2>&1
+    ufw allow 53/udp >/dev/null 2>&1
 
     # DoT (DNS-over-TLS, TCP 端口 853)
     # NGINX 使用此端口终止 TLS 并代理到 Unbound，此处预先放通
-    if ! ufw status | grep -qE '853/tcp\s+ALLOW'; then
-        ufw allow 853/tcp >/dev/null 2>&1
-    fi
+    ufw allow 853/tcp >/dev/null 2>&1
 
     # 注意: DoH (端口 443) 由单独安装的 NGINX 反向代理处理。
     # NGINX 安装脚本应自行开放 443 端口。
@@ -1155,7 +1150,7 @@ EOF
 
     # 确保 auditd 已安装并尝试加载新规则
     if systemctl is-active --quiet auditd 2>/dev/null; then
-        augenrules --load 2>/dev/null || warn "审计规则加载遇到问题（可能需要重启系统使 -e 2 锁定生效后重载）。"
+        augenrules --load 2>/dev/null || warn "审计规则加载遇到问题（若系统审计规则已锁定 -e 2，需要重启系统后生效）。"
     fi
 
     info "Unbound DNS 专用审计规则已配置。"
