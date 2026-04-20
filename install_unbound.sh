@@ -593,12 +593,13 @@ setup_tls_certificates() {
     # 生成自签名 TLS 证书（用于初始使用 / 测试）
     # 生产环境建议替换为 Let's Encrypt 等 CA 签发的正式证书
     info "正在生成自签名 TLS 证书（有效期 3650 天）..."
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout "$TLS_KEY_FILE" \
         -out "$TLS_CERT_FILE" \
         -days 3650 -nodes \
-        -subj "/CN=dns.local/O=Unbound DNS" \
-        2>/dev/null
+        -subj "/CN=dns.local/O=Unbound DNS"; then
+        fatal "TLS 证书生成失败。请检查 openssl 是否正确安装。"
+    fi
 
     if [[ ! -f "$TLS_CERT_FILE" ]] || [[ ! -f "$TLS_KEY_FILE" ]]; then
         fatal "TLS 证书生成失败。DoT/DoH 需要有效的 TLS 证书。"
