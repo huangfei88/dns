@@ -87,6 +87,41 @@ DRY_RUN="false"
 ACTION="install"    # 默认动作: install | uninstall | update
 
 ###############################################################################
+# SSH 端口自动检测
+# 从 sshd 配置文件中读取实际监听端口，避免硬编码 22。
+# 优先检查 sshd_config.d/ 下的配置片段（Debian 13 默认），再检查主配置文件。
+# 如果无法确定，回退到默认端口 22。
+###############################################################################
+detect_ssh_port() {
+    local ssh_port=""
+
+    # 方法 1: 从 sshd_config.d/*.conf 中查找（Debian 13 推荐方式）
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        ssh_port="$(grep -rhiE '^\s*Port\s+' /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
+                    | tail -1 | awk '{print $2}' | tr -d '[:space:]')"
+    fi
+
+    # 方法 2: 从主配置文件 sshd_config 中查找
+    if [[ -z "$ssh_port" ]] && [[ -f /etc/ssh/sshd_config ]]; then
+        ssh_port="$(grep -iE '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null \
+                    | tail -1 | awk '{print $2}' | tr -d '[:space:]')"
+    fi
+
+    # 方法 3: 检测当前 sshd 实际监听的端口
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="$(ss -tlnp 2>/dev/null | grep -E 'sshd' \
+                    | awk '{print $4}' | grep -oE '[0-9]+$' | head -1)"
+    fi
+
+    # 回退: 默认端口 22
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="22"
+    fi
+
+    echo "$ssh_port"
+}
+
+###############################################################################
 # 日志辅助函数
 # log() 仅写入日志文件；终端输出由 info/warn/error 各自处理。
 # 当日志文件不可写时（例如非 root 用户运行），静默忽略写入失败，
@@ -1100,6 +1135,11 @@ EOF
 configure_firewall() {
     info "正在配置 UFW 防火墙..."
 
+    # 自动检测当前 SSH 端口
+    local ssh_port
+    ssh_port="$(detect_ssh_port)"
+    info "检测到 SSH 端口: ${ssh_port}"
+
     # 重置 UFW 到干净状态（非交互式）
     ufw --force reset >/dev/null 2>&1
 
@@ -1108,7 +1148,7 @@ configure_firewall() {
     ufw default allow outgoing >/dev/null 2>&1
 
     # SSH 速率限制（每个 IP 每 30 秒限制 6 次连接）
-    ufw limit ssh/tcp >/dev/null 2>&1
+    ufw limit "${ssh_port}/tcp" >/dev/null 2>&1
 
     # DNS (UDP 和 TCP 端口 53)
     ufw allow 53/tcp >/dev/null 2>&1
@@ -1124,7 +1164,7 @@ configure_firewall() {
     ufw --force enable >/dev/null 2>&1
 
     info "UFW 防火墙已配置并激活。"
-    info "已开放端口: SSH(22/tcp-限速), DNS(53/tcp+udp)"
+    info "已开放端口: SSH(${ssh_port}/tcp-限速), DNS(53/tcp+udp)"
     info "注意: DoT(853) 和 DoH(443) 端口将由 NGINX 安装脚本开放。"
 }
 
@@ -1927,6 +1967,8 @@ post_install_validation() {
 # 打印安装摘要
 ###############################################################################
 print_summary() {
+    local ssh_port
+    ssh_port="$(detect_ssh_port)"
     cat <<EOF
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1943,7 +1985,7 @@ print_summary() {
 ║    • 远程控制:       8953 (仅限本地)                                         ║
 ║                                                                            ║
 ║  防火墙已开放端口:                                                           ║
-║    • SSH:  22/tcp (速率限制)                                                 ║
+║    • SSH:  $(printf '%-10s' "${ssh_port}/tcp") (速率限制)                                          ║
 ║    • DNS:  53/tcp + 53/udp                                                  ║
 ║                                                                            ║
 ║  注意: DOT (端口 853) 和 DoH (端口 443) 由 NGINX 反向代理提供               ║
@@ -2077,7 +2119,7 @@ uninstall_unbound() {
         info "  1.  停止并禁用 Unbound 服务"
         info "  2.  停止并禁用相关定时器（根提示/信任锚更新）"
         info "  3.  移除 Fail2Ban DNS 防护规则"
-        info "  4.  移除 UFW 防火墙中的 DNS 规则"
+        info "  4.  移除 UFW 防火墙中的 DNS 规则（保留 SSH 规则）"
         info "  5.  移除 Unbound 相关的 sysctl 调优"
         info "  6.  移除 Unbound 日志轮转配置"
         info "  7.  移除 Unbound auditd 审计规则"
@@ -2140,7 +2182,8 @@ uninstall_unbound() {
     info "步骤 4: 移除 UFW 防火墙中的 DNS 规则..."
     ufw delete allow 53/tcp 2>/dev/null || true
     ufw delete allow 53/udp 2>/dev/null || true
-    info "  DNS 防火墙规则已移除。"
+    # 注意: 仅移除 DNS 规则，SSH 规则保持不变以确保远程管理不受影响
+    info "  DNS 防火墙规则已移除（SSH 规则保持不变）。"
 
     info "步骤 5: 移除 Unbound 相关的 sysctl 调优..."
     rm -f /etc/sysctl.d/99-unbound-dns.conf
@@ -2152,7 +2195,7 @@ uninstall_unbound() {
     info "  日志轮转配置已移除。"
 
     info "步骤 7: 移除 Unbound auditd 审计规则..."
-    rm -f /etc/audit/rules.d/50-unbound.rules
+    rm -f /etc/audit/rules.d/99-pci-dss-cis.rules
     if systemctl is-active --quiet auditd 2>/dev/null; then
         augenrules --load 2>/dev/null || true
     fi
@@ -2167,6 +2210,8 @@ uninstall_unbound() {
     info "步骤 9: 移除监控和健康检查脚本..."
     rm -f /usr/local/bin/unbound-health-check
     rm -f /usr/local/bin/unbound-stats
+    rm -f /usr/local/bin/update-root-hints
+    rm -f /usr/local/bin/update-trust-anchor
     info "  监控脚本已移除。"
 
     info "步骤 10: 卸载 Unbound 软件包..."
