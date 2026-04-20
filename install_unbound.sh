@@ -402,7 +402,7 @@ net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 65535
 net.core.optmem_max = 2097152
 
-# TCP 调优（用于 DNS TCP 连接和未来 NGINX 反向代理流量）
+# TCP 调优（用于 DNS TCP 连接和 DoT/DoH TLS 流量）
 net.ipv4.tcp_rmem = 4096 1048576 8388608
 net.ipv4.tcp_wmem = 4096 1048576 8388608
 net.ipv4.tcp_max_syn_backlog = 65536
