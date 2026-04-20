@@ -119,7 +119,7 @@ sudo ./install_unbound.sh --dry-run
               │           ┌──────┴───────────────────┘
               │           │  NGINX Reverse Proxy
               │           │  ┌─ stream:853 → TCP proxy ─┐
-              │           │  └─ http:443 → proxy_pass  ──┘
+              │           │  └─ http:443 → grpc_pass h2c ──┘
               │           └──────┬──────────────┘
               │                  │
               └──────────────────┤
@@ -531,7 +531,7 @@ sudo sed -i 's/dns.example.com/YOUR_ACTUAL_DOMAIN/g' /etc/nginx/stream.conf.d/dn
 
 #### 6.5 配置 NGINX 实现 DoH（DNS-over-HTTPS）
 
-DoH 使用 NGINX 的 `http` 模块在端口 443 终止 HTTPS，并将 HTTP 请求代理到 Unbound 内置的 HTTP 端点。
+DoH 使用 NGINX 的 `http` 模块在端口 443 终止 HTTPS，并将请求代理到 Unbound 内置的 HTTP/2 端点。由于 Unbound 的 DoH 模块（基于 libnghttp2）**严格要求 HTTP/2**，会直接拒绝 HTTP/1.1 连接，因此使用 NGINX 的 `grpc_pass` 指令建立 HTTP/2 明文（h2c）连接到后端。
 
 **第 1 步：启用 Unbound 的 DoH 后端**
 
@@ -606,29 +606,26 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
 
-    # DoH endpoint (RFC 8484)
+    # DoH 端点（RFC 8484）
     location /dns-query {
-        # Proxy to Unbound's local DoH backend (no TLS, handled by NGINX)
-        proxy_pass http://127.0.0.1:8443/dns-query;
+        # 使用 grpc_pass 建立 HTTP/2 明文（h2c）连接到 Unbound DoH 后端。
+        # Unbound 的 DoH 模块（libnghttp2）严格要求 HTTP/2，
+        # 会直接拒绝 HTTP/1.1 连接。NGINX 的 proxy_pass 仅支持 HTTP/1.x，
+        # 因此使用 grpc_pass 建立 h2c 连接到后端。
+        grpc_pass grpc://127.0.0.1:8443;
 
-        # HTTP settings
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        # 覆盖默认 gRPC Content-Type（application/grpc），
+        # 保留客户端原始的 DoH Content-Type（application/dns-message）
+        grpc_set_header Content-Type $content_type;
+        grpc_set_header Host $host;
+        grpc_set_header X-Real-IP $remote_addr;
 
-        # Required content types for DoH (RFC 8484)
-        # GET requests use ?dns= parameter, POST requests use application/dns-message body
-        proxy_set_header Accept "application/dns-message";
+        # 超时设置
+        grpc_connect_timeout 5s;
+        grpc_send_timeout 10s;
+        grpc_read_timeout 10s;
 
-        # Timeout settings
-        proxy_connect_timeout 5s;
-        proxy_send_timeout 10s;
-        proxy_read_timeout 10s;
-
-        # Disable buffering for low-latency DNS responses
-        proxy_buffering off;
-
-        # Limit request body size (DNS messages are small, max 512 bytes typical)
+        # 限制请求体大小（DNS 消息通常很小，典型值最大 512 字节）
         client_max_body_size 4k;
     }
 
@@ -806,7 +803,8 @@ sudo ss -tlnp | grep -E ':(443|853)\s'
 sudo ss -tlnp | grep ':8443\s'
 
 # 直接测试 Unbound DoH 后端（绕过 NGINX，使用线格式 GET，查询 example.com A 记录）
-curl -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
+# 注意：必须使用 --http2-prior-knowledge，因为 Unbound DoH 仅接受 HTTP/2（h2c）
+curl --http2-prior-knowledge -sSf 'http://127.0.0.1:8443/dns-query?dns=q80BAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' | \
     od -A x -t x1
 
 # 检查 TLS 证书有效性
@@ -831,6 +829,7 @@ kdig @dns.example.com +tls +tls-host=dns.example.com -d example.com A
 **常见问题：**
 - **端口 853 "Connection refused"**：确保 NGINX 正在运行且 stream 配置已加载。检查 `include stream.conf.d/*.conf;` 行是否在 `http {}` 块**外部**。
 - **DoH 出现 "502 Bad Gateway"**：确保 Unbound 正在监听端口 8443。运行 `unbound-checkconf` 并检查 `https-port` 错误。如果 `http-notls-downstream` 未被识别，可能是您的 Unbound 版本过旧。
+- **DoH 直接测试失败（"curl: (56) Recv failure"）**：Unbound 的 DoH 模块（libnghttp2）严格要求 HTTP/2。直接测试（绕过 NGINX）时，必须使用 `curl --http2-prior-knowledge`。普通 `curl` 默认使用 HTTP/1.1，Unbound 会直接拒绝连接。
 - **证书错误**：运行 `sudo certbot certificates` 检查证书状态。确保域名匹配。
 - **"SSL handshake failed"**：检查 NGINX 中的 `ssl_protocols` 和 `ssl_ciphers` 是否与客户端支持的协议匹配。
 
