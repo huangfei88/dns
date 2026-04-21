@@ -1232,7 +1232,6 @@ LimitNPROC=512
 # --- 重启策略 ---
 Restart=always
 RestartSec=5
-WatchdogSec=60
 EOF
     chmod 0644 /etc/systemd/system/unbound.service.d/hardening.conf
     chown root:root /etc/systemd/system/unbound.service.d/hardening.conf
